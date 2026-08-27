@@ -1,0 +1,21 @@
+# 行尾策略：文本文件统一 LF（仓库内），checkout 时按平台转换
+* text=auto
+
+# JSON / 代码 / 文档显式声明为文本
+*.json text
+*.py text
+*.md text
+*.toml text
+*.yml text
+*.yaml text
+*.txt text
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# 二进制文件不转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
