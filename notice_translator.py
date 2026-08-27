@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping, Optional
 
 # 表情回应通知类型（NapCat 插件 codecs/notice/message_codec.py）
@@ -29,6 +30,26 @@ NOTICE_TYPE_EMOJI_LIKE = "group_msg_emoji_like"
 CFG_NOTICE_TYPE = "napcat_notice_type"
 CFG_NOTICE_SUB_TYPE = "napcat_notice_sub_type"
 CFG_NOTICE_PAYLOAD = "napcat_notice_payload"
+
+# 注入提示词的文本字段最大长度（超出截断，防恶意昵称/描述撑爆上下文）
+MAX_SAFE_TEXT_LEN = 64
+# 昵称等用户可控文本中禁止出现的控制字符（含换行/回车），防止注入提示词
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def sanitize_user_text(value: Any, *, max_len: int = MAX_SAFE_TEXT_LEN) -> str:
+    """清理用户可控文本，用于拼入 processed_plain_text / raw_message。
+
+    - 移除全部控制字符（\x00-\x1f、\x7f，含换行/回车）；
+    - 压缩空白（连续空白→单空格）；
+    - 超长截断（保留末尾省略号），避免恶意昵称注入提示词或撑爆上下文。
+    """
+    text = str(value or "").strip()
+    text = _CTRL_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
 
 
 class EmojiLikeNoticeParser:
@@ -133,7 +154,7 @@ class EmojiLikeNoticeParser:
         if not isinstance(likes, list):
             likes = []
 
-        names = self.emoji_resolver.resolve_likes(likes) if likes else []
+        names = [sanitize_user_text(n) for n in self.emoji_resolver.resolve_likes(likes)] if likes else []
         # 描述库命中：首个表情 ID 若在描述库中，取描述文本（如「一个表情：<描述>」）
         desc_hint = ""
         if likes and self._description_library:
@@ -142,7 +163,7 @@ class EmojiLikeNoticeParser:
                 desc_hint = self._description_library.get(first_emoji_id, "")
         # 未知表情（映射表缺失）：名称列表可能含 [未知表情<id>]；按 optimize_unknown 决定是否优化
         summary = self._build_summary(
-            actor=actor_nickname or actor_user_id or "有人",
+            actor=sanitize_user_text(actor_nickname or actor_user_id) or "有人",
             target_message_id=target_message_id,
             names=names,
             has_likes=bool(likes),
@@ -151,10 +172,10 @@ class EmojiLikeNoticeParser:
         )
 
         return {
-            "actor_user_id": actor_user_id,
+            "actor_user_id": sanitize_user_text(actor_user_id, max_len=32),
             "actor_nickname": actor_nickname,
-            "target_message_id": target_message_id,
-            "target_message_seq": target_message_seq,
+            "target_message_id": sanitize_user_text(target_message_id, max_len=32),
+            "target_message_seq": sanitize_user_text(target_message_seq, max_len=32),
             "likes": likes,
             "names": names,
             "summary": summary,
@@ -187,14 +208,14 @@ class EmojiLikeNoticeParser:
         - desc_hint 非空（表情 ID 命中插件描述库）→ 显示「表情名：<描述>」
           （表情名取映射表解析结果，如「玫瑰：鲜花」；映射表缺失时退回「一个表情：<描述>」）。
         """
-        target = f"消息(ID:{target_message_id})" if target_message_id else "一条消息"
+        target = f"消息(ID:{sanitize_user_text(target_message_id, max_len=24)})" if target_message_id else "一条消息"
         if desc_hint:
             # 描述库命中：优先显示「映射表情名：描述」（如「玫瑰：鲜花」）。
             # 表情名取 names 第一项并去掉方括号；names 为空（映射表缺失）时退回「一个表情：描述」。
             name_str = ""
             if has_likes and names:
                 name_str = str(names[0]).strip("[]")
-            emoji_part = f"{name_str}：{desc_hint}" if name_str else f"一个表情：{desc_hint}"
+            emoji_part = f"{name_str}：{sanitize_user_text(desc_hint, max_len=96)}" if name_str else f"一个表情：{sanitize_user_text(desc_hint, max_len=96)}"
         elif has_likes and names:
             if optimize_unknown:
                 known = [
@@ -211,12 +232,13 @@ class EmojiLikeNoticeParser:
 
     @staticmethod
     def _resolve_actor_nickname(message_dict: Mapping[str, Any], actor_user_id: str) -> str:
-        """从消息的 user_info 或 payload 中取操作者昵称。"""
+        """从消息的 user_info 或 payload 中取操作者昵称（已做注入清理）。"""
         user_info = message_dict.get("message_info", {}).get("user_info", {})
         if isinstance(user_info, Mapping):
             nickname = str(user_info.get("user_nickname") or "").strip()
             if nickname:
-                return nickname
+                # 昵称是用户可控文本：清理控制字符/换行并限长，防止注入提示词
+                return sanitize_user_text(nickname)
         # 兜底：通知里没有昵称时返回空，调用方用 user_id 代替
         return ""
 
