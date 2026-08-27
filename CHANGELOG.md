@@ -9,6 +9,7 @@
 - 12951 名称映射改为「祝(猪)」（emoji_reaction_extra.json 覆盖 merged 表），与 QQ 客户端实际显示名一致。
 - 说明：MaiBot 插件 SDK 无「强制链式工具调用」机制（`@Tool` 为静态声明、`ctx.tool` 仅只读查询），因此采用「新查询工具 + 描述引导 + 失败回退」组合方案。
 - 修复：`emoji_like_list` 返回的 dict 现在包含 `content` 字段（MaiBot Tool 规范中给 LLM 阅读的纯文本），逐行列出每个表情的 `emoji_id`（数字）+ 名称 + 描述；此前 LLM 只能看到"有 11 个表情"但看不到具体 ID（结构化字段 `emoji_list` 对 LLM 不可见）。`emoji_like` 成功/失败返回也补上 `content`，未识别时明确引导先查 `emoji_like_list`、不要盲试。
+- 修复：**机器人自己贴表情时重复入库两条**。根因：机器人贴表情后 QQ/NapCat 会回推一条 `group_msg_emoji_like` 通知（操作者是机器人自己），插件 Hook 把它当"群友贴表情"翻译入库；而插件在贴表情成功时已主动注入一条记录（`_record_and_context`），导致同一次贴表情出现两条入库。修复：通知翻译 Hook 识别 `actor_user_id == self_id`（机器人自己发起的表情回应）并跳过（abort），只保留主动注入的记录；群友贴表情通知照常翻译。
 
 ## 0.1.0（2026-08-27）
 
