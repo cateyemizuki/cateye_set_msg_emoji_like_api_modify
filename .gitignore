@@ -1,0 +1,19 @@
+# 运行配置（含个人配置信息，不公开）
+config.toml
+config_back/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 数据目录（若插件产生本地数据）
+data/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
