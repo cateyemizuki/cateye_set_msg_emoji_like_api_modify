@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.cateye.set-msg-emoji-like",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "name": "表情回应",
   "description": "对聊天消息贴 QQ 表情回应（reaction）：注册 LLM 工具让模型自然决定贴表情表达情绪或与群友交互（可替代 send_emoji）；同时把收到的表情回应通知翻译为可读文本注入框架。必需依赖 NapCat 适配器（maibot-team.napcat-adapter）提供 set_msg_emoji_like API；缺失时插件不会被加载。",
   "author": {

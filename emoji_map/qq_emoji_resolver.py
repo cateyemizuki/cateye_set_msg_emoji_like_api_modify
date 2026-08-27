@@ -10,7 +10,7 @@
 
     resolver = QQEmojiResolver()
     # 解析表情回应通知的 likes[].emoji_id
-    name = resolver.resolve("12951")   # -> "点赞"
+    name = resolver.resolve("12951")   # -> "祝(猪)"
     name = resolver.resolve("999999")  # -> "未知表情999999"
 
 外部覆盖文件（可选，按加载顺序后者覆盖前者）:
@@ -102,9 +102,9 @@ def _read_json(path: Path) -> Any:
 def _parse_emoji_json(data: Any) -> dict[str, str]:
     """把三种 JSON 格式解析为 id -> 名称 字典。
 
-    格式 A（简单字典）: {"12951": "点赞", ...}
-    格式 B（emojis 列表）: {"emojis": [{"id": 12951, "name": "点赞", "aliases": [...]}, ...]}
-    格式 C（纯列表）: [{"id": 12951, "name": "点赞"}, ...]
+    格式 A（简单字典）: {"12951": "祝(猪)", ...}
+    格式 B（emojis 列表）: {"emojis": [{"id": 12951, "name": "祝(猪)", "aliases": [...]}, ...]}
+    格式 C（纯列表）: [{"id": 12951, "name": "祝(猪)"}, ...]
     """
     result: dict[str, str] = {}
     if not isinstance(data, dict):

@@ -35,7 +35,7 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.1.0"
+SUPPORTED_CONFIG_VERSION = "0.2.0"
 
 # 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
 DEFAULT_EMOJI_ID = 12951
@@ -74,6 +74,11 @@ class EmojiReactionConfig(PluginConfigBase):
             f"{emoji_id}: {desc}" for emoji_id, desc in DEFAULT_DESCRIPTION_LIBRARY.items()
         ],
         description="描述库（每行一条）：`emoji_id: 描述`。如 `12951: 该回应表情等效网络流行的猪猪表情包，表达群友可爱又有点笨的样子`",
+    )
+
+    allow_fallback_to_default: bool = Field(
+        default=True,
+        description="未识别的表情表达回退到默认表情（12951，点赞/猪猪）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
     )
 
     @field_validator("description_library", mode="before")
@@ -210,12 +215,71 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
     # ==================== Tool：贴表情 ====================
 
     @Tool(
+        "emoji_like_list",
+        brief_description="查询可用的贴表情（emoji_like）列表：必须先调用本工具确认表情 ID 后，才能用 emoji_like 贴表情",
+        description=(
+            "查询本插件配置的可贴表情列表。返回值中的 content 字段（纯文本）逐行列出了"
+            "每个表情的 emoji_id（数字）、名称与含义，例如「- emoji_id=14，微笑：礼貌微笑，表达友好、客气」。"
+            "在调用 emoji_like 贴表情之前，必须先调用本工具查看有哪些可用表情及其 ID，"
+            "然后把你想要的表情对应的 emoji_id（数字）传给 emoji_like 工具，不要凭印象编造表情表达或 ID。"
+            "本工具无参数，直接调用即可。"
+        ),
+        parameters=[],
+    )
+    async def tool_emoji_like_list(self, **kwargs: Any) -> Dict[str, Any]:
+        """查询可用的贴表情列表（供 LLM 在调用 emoji_like 前确认表情与 ID）。"""
+        del kwargs
+        library = self._get_description_library()
+        if not library:
+            return {
+                "success": True,
+                "emoji_list": [],
+                "content": (
+                    "当前没有配置任何表情，贴表情将使用默认表情 12951（祝(猪)）。"
+                    "直接调用 emoji_like 且不传 emoji 参数即可。"
+                ),
+                "message": "当前没有配置任何表情，将使用默认表情 12951",
+                "default_emoji_id": str(DEFAULT_EMOJI_ID),
+            }
+        emoji_list = [
+            {
+                "emoji_id": emoji_id,
+                "emoji_name": self._notice_parser.emoji_resolver.resolve(emoji_id),
+                "description": desc,
+            }
+            for emoji_id, desc in library.items()
+        ]
+        # content 是 MaiBot Tool 规范中给 LLM 阅读的文本（其他结构化字段 LLM 未必可见），
+        # 必须把 ID 以纯文本逐行列出，否则 LLM 只看到描述看不到数字 ID。
+        lines = [
+            f"可用贴表情 {len(emoji_list)} 个（emoji_id 是传给 emoji_like 的 emoji 参数值）："
+        ]
+        for item in emoji_list:
+            lines.append(
+                f"- emoji_id={item['emoji_id']}，{item['emoji_name']}：{item['description']}"
+            )
+        lines.append(
+            "选择要用的表情后，把对应 emoji_id（数字）传给 emoji_like 工具；"
+            "也可以不传 emoji 参数使用默认表情。"
+        )
+        content = "\n".join(lines)
+        return {
+            "success": True,
+            "emoji_list": emoji_list,
+            "content": content,
+            "message": content,
+            "default_emoji_id": str(DEFAULT_EMOJI_ID),
+        }
+
+    @Tool(
         "emoji_like",
         description=(
             "对聊天中的某条消息贴一个 QQ 表情回应（reaction）。"
             "用于替代 send_emoji 表达情绪或与群友交互：当你想表达赞同、开心、无奈、可爱等情绪，"
             "或想与群友互动时，可以对目标消息贴一个表情回应，比发送表情包更轻量自然。"
             "默认贴到最近一条非机器人消息（通常是你正在回复/讨论的那条）。"
+            "调用前请先调用 emoji_like_list 确认可用的表情及其 ID，再把对应的 ID 传入 emoji 参数，"
+            "不要凭印象编造表情表达或 ID。若你传入的描述无法识别，插件会自动回退到默认表情（12951）。"
             "调用后请在你的回复中自然提及这次贴表情，避免重复表达。"
         ),
         parameters=[
@@ -223,8 +287,9 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 name="emoji",
                 param_type=ToolParamType.STRING,
                 description=(
-                    "要贴的表情：可为描述库中的表达（如「猪猪表情」），或直接给表情 ID。"
-                    "留空时使用默认表情（点赞）。"
+                    "要贴的表情 ID（数字，如 14、66、12951）。"
+                    "先调用 emoji_like_list 查看可用表情及其 emoji_id，把对应的数字 ID 传到这里；"
+                    "也可以是描述库中的表达（如「猪猪表情」）。留空时使用默认表情（12951，祝(猪)）。"
                 ),
                 required=False,
             ),
@@ -247,10 +312,16 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "error": "缺少 stream_id，无法贴表情"}
 
-        # 1. 解析表情 ID（描述库匹配 or 直接数字）
-        emoji_id = self._resolve_emoji_id(emoji_raw)
+        # 1. 解析表情 ID（描述库匹配 or 直接数字；失败回退默认表情）
+        emoji_id, fallback_used = self._resolve_emoji_id(emoji_raw)
         if emoji_id is None:
-            return {"success": False, "error": f"未识别的表情表达：{emoji_raw!r}，请从描述库中选择或使用有效表情 ID"}
+            error_text = (
+                f"未识别的表情表达：{emoji_raw!r}。"
+                "请先调用 emoji_like_list 查看可用表情及其 ID，"
+                "把对应的 emoji_id（数字）传给本工具的 emoji 参数；"
+                "或留空 emoji 参数使用默认表情（12951）。不要反复尝试未列出的表达。"
+            )
+            return {"success": False, "error": error_text, "content": error_text}
 
         # 2. 定位目标消息（未指定时取最近一条非机器人消息）
         if not target_message_id:
@@ -267,12 +338,21 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         await self._record_and_context(stream_id, target_message_id, emoji_id)
 
         desc = self._emoji_description(emoji_id)
-        return {
+        emoji_name = self._notice_parser.emoji_resolver.resolve(emoji_id)
+        success_text = f"已对消息(ID:{target_message_id})贴了表情：{emoji_name}(ID:{emoji_id})，{desc}"
+        result: Dict[str, Any] = {
             "success": True,
-            "message": f"已对消息(ID:{target_message_id})贴了表情：{desc}",
+            "content": success_text,
+            "message": success_text,
             "emoji_id": emoji_id,
+            "emoji_name": emoji_name,
             "target_message_id": target_message_id,
         }
+        if fallback_used:
+            result["notice"] = (
+                f"传入的表情表达「{emoji_raw}」未命中描述库，已自动回退到默认表情 {emoji_id}"
+            )
+        return result
 
     # ==================== 贴表情辅助 ====================
 
@@ -308,25 +388,50 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 self.ctx.logger.warning("description_library JSON 解析失败，使用默认：%r", raw[:80])
         return self._replacer.normalize_description_library(parsed or DEFAULT_DESCRIPTION_LIBRARY)
 
-    def _resolve_emoji_id(self, emoji_raw: str) -> Optional[int]:
-        """解析表情：描述库按值匹配 → 数字直接转 int → 失败返回 None。"""
+    def _resolve_emoji_id(self, emoji_raw: str) -> tuple[Optional[int], bool]:
+        """解析表情：表情名反查 → 描述库文本匹配 → 数字直接转 int → 失败回退默认表情。
+
+        Returns:
+            tuple[Optional[int], bool]: (表情 ID, 是否回退到默认表情)。
+            当配置 `allow_fallback_to_default` 开启时，任何无法识别的输入
+            （描述库外的情绪词、无效文本等）都会回退到默认表情，不再返回 None。
+        """
         emoji_raw = str(emoji_raw or "").strip()
         if not emoji_raw:
-            # 空 → 默认表情
-            return DEFAULT_EMOJI_ID
-        # 描述库：值匹配（描述文本）
+            # 空 → 默认表情（不算回退，是正常默认）
+            return DEFAULT_EMOJI_ID, False
         library = self._get_description_library()
+
+        # 1. 表情名反查（映射表：名称 → ID）。LLM 可能直接传表情名（如「可爱」「吃瓜」），
+        #    这在描述库文本中未必出现，但映射表里有名称。优先精确名称匹配，且只认描述库内的 ID，
+        #    避免把描述库外的表情名也匹配进来（贴了描述库外的表情，通知翻译时无描述可显示）。
+        try:
+            resolver = self._notice_parser.emoji_resolver
+            for emoji_id in library:
+                if str(resolver.resolve(emoji_id)) == emoji_raw:
+                    return int(emoji_id), False
+        except Exception:
+            pass
+
+        # 2. 描述库：值匹配（描述文本）
         for emoji_id, desc in library.items():
             if emoji_raw == desc or emoji_raw in desc or desc in emoji_raw:
                 try:
-                    return int(emoji_id)
+                    return int(emoji_id), False
                 except (TypeError, ValueError):
                     continue
-        # 直接数字
+        # 3. 直接数字
         try:
-            return int(emoji_raw)
+            return int(emoji_raw), False
         except (TypeError, ValueError):
-            return None
+            pass
+        # 4. 无法识别 → 是否回退默认表情（防止 LLM 传情绪词「开心」「俏皮」等导致失败）
+        if self.config.emoji_reaction.allow_fallback_to_default:
+            self.ctx.logger.info(
+                "表情表达「%s」未命中描述库，回退到默认表情 %d", emoji_raw, DEFAULT_EMOJI_ID
+            )
+            return DEFAULT_EMOJI_ID, True
+        return None, False
 
     async def _find_recent_user_message(self, stream_id: str) -> str:
         """找最近一条非机器人消息的 message_id（get_by_time_in_chat + filter_mai）。"""
