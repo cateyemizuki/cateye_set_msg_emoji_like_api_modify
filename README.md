@@ -2,6 +2,12 @@
 
 为麦麦（MaiBot）框架的插件，让机器人可以对聊天消息**贴 QQ 表情回应（reaction）**，并把收到/发起的表情回应翻译成可读文本显示在 WebUI 聊天记录中。
 
+### 效果演示
+
+机器人「迷迭香」对群友消息贴了「祝」表情回应（QQ 端显示，含贴表情记录入库）：
+
+![效果演示：迷迭香对凯特艾的消息贴了「祝」表情回应](assets/emoji-like-demo.jpg)
+
 - **LLM 工具 `emoji_like`**：让模型在聊天中自然决定对消息贴表情回应（如表达赞同、开心、无奈、可爱，或与群友互动），可作为 `send_emoji` 的轻量替代。
 - **表情回应通知翻译**：拦截 NapCat 的 `group_msg_emoji_like` 通知，翻译为「谁 对哪条消息 贴了 什么表情」，注入框架内部。
 - **群友是🐷**：用户发消息时按概率/规则自动贴表情（可配置黑白名单、冷却、猪友专属连贴机制）。
@@ -111,6 +117,8 @@ cateye_set_msg_emoji_like_api_modify/
 │   ├── emoji_reaction_extra.json  # 表情回应扩展 ID 手动维护表
 │   ├── merge_emoji_maps.py     # 多源合并工具
 │   └── README.md               # 映射表说明与扩展指南
+├── assets/                      # 效果演示图片
+│   └── emoji-like-demo.jpg      # 表情回应效果演示截图
 ├── README.md                   # 本说明文档
 └── LICENSE                     # MIT 许可证
 ```
