@@ -758,13 +758,35 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         - 通过 blocking 模式修改 kwargs["message"]（序列化消息 dict）；
         - 改写 processed_plain_text 与 raw_message（单条 text 段），
           使 MaiBot 后续处理（含 message.process() 重生成文本）使用翻译后的内容；
-        - 非表情回应通知原样返回，不拦截。
+        - 非表情回应通知原样返回，不拦截；
+        - **机器人自己发起的表情回应通知跳过**：机器人贴表情后，QQ/NapCat 会回推一条
+          「机器人贴了表情」的通知，而本插件在贴表情成功时已主动注入一条记录
+          （_record_and_context），若再翻译这条通知会重复入库两条。因此这里识别
+          actor_user_id == self_id 的通知并跳过（群友的照常翻译）。
         """
         message = kwargs.get("message")
         if not isinstance(message, Mapping):
             return {"action": "continue", "modified_kwargs": kwargs}
 
-        notice_text = self._notice_parser.build_notice_text(message)
+        parsed = self._notice_parser.parse(message)
+        if parsed is None:
+            return {"action": "continue", "modified_kwargs": kwargs}
+
+        # 跳过机器人自己发起的表情回应通知（避免与主动注入记录重复）
+        try:
+            message_info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
+            additional = message_info.get("additional_config") if isinstance(message_info.get("additional_config"), Mapping) else {}
+            self_id = str(additional.get("self_id") or additional.get("platform_io_account_id") or "").strip()
+            actor_user_id = str(parsed.get("actor_user_id") or "").strip()
+            if self_id and actor_user_id == self_id:
+                self.ctx.logger.info(
+                    "跳过机器人自己发起的表情回应通知（self_id=%s，避免与主动记录重复）", self_id
+                )
+                return {"action": "abort"}
+        except Exception:
+            pass
+
+        notice_text = parsed["summary"] if parsed.get("summary") else None
         if not notice_text:
             return {"action": "continue", "modified_kwargs": kwargs}
 
