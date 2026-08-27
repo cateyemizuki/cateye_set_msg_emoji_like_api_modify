@@ -12,7 +12,13 @@
 - **表情回应通知翻译**：拦截 NapCat 的 `group_msg_emoji_like` 通知，翻译为「谁 对哪条消息 贴了 什么表情」，注入框架内部。
 - **群友是🐷**：用户发消息时按概率/规则自动贴表情（可配置黑白名单、冷却、猪友专属连贴机制）。
 
-本插件依赖 **NapCat 适配器**（`maibot-team.napcat-adapter`）提供 `set_msg_emoji_like` API，已实测兼容 **SnowLuma 适配器**（本体 + 官方 NapCat 插件）环境。
+本插件**必需依赖 NapCat 适配器**（`maibot-team.napcat-adapter`，已在 `_manifest.json` 的 `dependencies` 中声明）提供 `set_msg_emoji_like` / `adapter.napcat.action.call` API。**未安装该适配器时插件不会被加载**（由 Host 依赖流水线阻止）。已实测兼容 **SnowLuma 适配器**（本体 + 官方 NapCat 插件）环境：表情回应通知翻译复用 NapCat 插件的 `group_msg_emoji_like` 通知格式；贴表情能力仅由 NapCat 适配器提供（SnowLuma 自带的通知翻译与其不冲突）。
+
+目前如果使用中发现maibot没有正确收到回应信息，且观察maibot日志中出现类似
+
+>08-27 20:08:32 [平台接入管理] 忽略重复入站消息: dedupe_key=gateway:maibot-team.napcat-adapter:napcat_gateway:1860095923
+
+需要自行修改napcat适配器插件的内部拦截规则或等待官方更新适配器
 
 ## 功能特性
 
@@ -31,7 +37,7 @@
 
 1. 将本插件目录（含 `_manifest.json`、`plugin.py`、`notice_translator.py`、`emoji_reaction_replacer.py`、`emoji_map/` 等文件）放入 MaiBot 的 `plugins/` 目录。
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
-3. 插件依赖 NapCat 适配器（`maibot-team.napcat-adapter`），请确保其已启用且能连接到 NapCat / SnowLuma 本体。
+3. **必须先安装并启用 NapCat 适配器**（`maibot-team.napcat-adapter`，插件中心的官方适配器），并确保其已连接到 NapCat / SnowLuma 本体。本插件 `_manifest.json` 已声明该插件级依赖，缺失时插件不会加载。
 
 > 兼容性声明：`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
 
@@ -87,6 +93,8 @@ pig_max_chain = 3                     # 猪友最多连贴条数
 - 仅对照表命中：`[事件-群消息表情回应] 凯特艾 对消息(ID:-1683989482)表达了 [玫瑰]`
 - 对照表 + 描述库命中：`[事件-群消息表情回应] 凯特艾 对消息(ID:-1683989482)表达了 玫瑰：<描述库中的具体含义>`
 - 未知表情（`optimize_unknown_emoji=false`）：`...表达了 [未知表情999999]`
+
+> 安全：昵称等用户可控文本在拼入 `processed_plain_text` / `raw_message` 前会清理控制字符（含换行/回车）、压缩空白并限长（昵称 ≤64 字符），防止恶意昵称注入提示词或撑爆上下文。
 
 ### 群友是🐷（自动贴表情）
 
