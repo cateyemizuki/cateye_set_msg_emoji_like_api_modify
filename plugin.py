@@ -35,10 +35,17 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.2.0"
+SUPPORTED_CONFIG_VERSION = "0.2.1"
 
 # 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
 DEFAULT_EMOJI_ID = 12951
+
+# 事件文本前缀：
+# - 常规事件（LLM 工具调用贴表情 / 群友贴表情通知翻译）：
+EVENT_TAG_NORMAL = "[事件-群消息表情回应]"
+# - 插件概率自动触发事件（「群友是🐷」概率自动贴表情，非 bot 调用工具）：
+#   聊天中用户未直接提及该行为时 LLM 应忽视该信息；若用户提及则回应为「随手贴的」。
+EVENT_TAG_PROBABILISTIC = "[事件-插件概率事件（聊天中用户未直接提及该行为则忽视该信息，如果提及该行为则回应为随手贴的）]"
 
 # NapCat 适配器插件的通用 action 入口（唯一短名）。
 # 用它直接下发 set_msg_emoji_like 动作，可传负 message_id（QQ 消息 ID 为带符号 int32），
@@ -488,19 +495,25 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         library = self._get_description_library()
         return library.get(str(emoji_id), "") or f"表情 {emoji_id}"
 
-    async def _record_and_context(self, stream_id: str, message_id: str, emoji_id: int) -> None:
+    async def _record_and_context(
+        self, stream_id: str, message_id: str, emoji_id: int, *, event_tag: str = EVENT_TAG_NORMAL
+    ) -> None:
         """把贴表情行为记录到聊天流（WebUI 可见）+ 注入 Planner 上下文。
 
         方式：构造 is_notify=True 合成通知消息 → ctx.gateway.route_message 注入
         → 走完整入站链（heartflow process_message 自动写 DB）→ WebUI 可见、
         进聊天流，且不真发到群里（参照智能戳戳插件机器人自戳通知的入库机制）。
+
+        event_tag: 事件文本前缀。默认「[事件-群消息表情回应]」；
+            插件概率自动触发（「群友是🐷」）时传 EVENT_TAG_PROBABILISTIC，
+            提示 LLM 这是概率事件：用户未直接提及则忽视，提及则回应为随手贴的。
         """
         desc = self._emoji_description(emoji_id)
         # 反查流信息（self_id、群、昵称）——身份字段缺失时放弃注入，避免脏数据
         stream_info = await self._fetch_stream_info(stream_id)
-        # 期望结构：`[事件-群消息表情回应] {bot名} 对消息(ID:X)贴了表情：{描述}`
+        # 期望结构：`{event_tag} {bot名} 对消息(ID:X)贴了表情：{描述}`
         bot_name = str(stream_info.get("bot_nickname") or stream_info.get("self_id") or "").strip() or "机器人"
-        record_text = f"[事件-群消息表情回应] {bot_name} 对消息(ID:{message_id})贴了表情：{desc}"
+        record_text = f"{event_tag} {bot_name} 对消息(ID:{message_id})贴了表情：{desc}"
         if not str(stream_info.get("self_id") or "").strip():
             self.ctx.logger.warning(
                 "贴表情记录身份信息缺失（self_id 为空），放弃注入聊天流（stream=%s）", stream_id
@@ -740,7 +753,11 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             self.ctx.logger.warning("群友是🐷贴表情失败（user=%s msg=%s）：%s", user_id, target_message_id, err)
             return
         self.ctx.logger.info("群友是🐷：对用户 %s 的消息 %s 贴了 12951", user_id, target_message_id)
-        await self._record_and_context(stream_id, target_message_id, emoji_id)
+        # 概率自动触发（非 bot 调用工具）：记录带「插件概率事件」标签，
+        # 提示 LLM 用户未直接提及该行为则忽视，提及则回应为随手贴的
+        await self._record_and_context(
+            stream_id, target_message_id, emoji_id, event_tag=EVENT_TAG_PROBABILISTIC
+        )
 
     # ==================== Hook：表情回应通知翻译 ====================
 
