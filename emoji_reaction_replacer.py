@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 # 描述库配置默认值：emoji_id -> 描述文本
 # 从 emoji_map/ 内置映射表中挑选的代表性经典 face ID（QQ 经典表情 ID 体系，
@@ -49,6 +49,18 @@ class EmojiReactionReplacer:
         return library
 
     # ---------- 执行贴表情 ----------
+
+    @staticmethod
+    def parse_reactable_message_id(message_id: Any) -> Optional[int]:
+        """把目标消息 ID 解析为可贴表情的整数 ID（QQ 消息 ID 为带符号 int32，负 ID 合法）。
+
+        解析失败（如 napcat-shadow-* / emoji-reaction-notice-* 等合成通知 ID）
+        返回 None：这类消息不是真实 QQ 消息，协议端没有可操作的消息 ID。
+        """
+        try:
+            return int(str(message_id).strip())
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def build_set_emoji_like_params(message_id: Any, emoji_id: int, set_like: bool = True) -> Dict[str, Any]:

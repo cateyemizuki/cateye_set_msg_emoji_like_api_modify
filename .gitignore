@@ -17,3 +17,9 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# 测试代码（本地开发用，不随插件上传）
+test/
+tests/
+test_*.py
+*_test.py

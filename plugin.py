@@ -35,7 +35,7 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.2.1"
+SUPPORTED_CONFIG_VERSION = "0.2.3"
 
 # 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
 DEFAULT_EMOJI_ID = 12951
@@ -57,7 +57,7 @@ NAPCAT_ACTION_CALL_API = "adapter.napcat.action.call"
 
 
 class EmojiLikeConfig(PluginConfigBase):
-    """表情配置。"""
+    """表情（emoji 配置节）：表情展示与未知表情显示方式。"""
 
     __ui_label__ = "表情"
     __ui_icon__ = "sentiment_satisfied"
@@ -66,11 +66,15 @@ class EmojiLikeConfig(PluginConfigBase):
     optimize_unknown_emoji: bool = Field(
         default=False,
         description="优化未知表情信息：开启后未知表情显示为「一个表情」（如「表达了 一个表情」）；关闭时显示「未知表情<id>」（与 snowluma 一致，默认关闭）",
+        json_schema_extra={
+            "label": "优化未知表情显示",
+            "hint": "未知表情显示优化",
+        },
     )
 
 
 class EmojiReactionConfig(PluginConfigBase):
-    """贴表情工具配置。"""
+    """贴表情工具（emoji_reaction 配置节）：描述库与回退行为。"""
 
     __ui_label__ = "贴表情工具"
     __ui_icon__ = "swap_horiz"
@@ -81,11 +85,19 @@ class EmojiReactionConfig(PluginConfigBase):
             f"{emoji_id}: {desc}" for emoji_id, desc in DEFAULT_DESCRIPTION_LIBRARY.items()
         ],
         description="描述库（每行一条）：`emoji_id: 描述`。如 `12951: 该回应表情等效网络流行的猪猪表情包，表达群友可爱又有点笨的样子`",
+        json_schema_extra={
+            "label": "描述库",
+            "hint": "表情描述库，一行一条",
+        },
     )
 
     allow_fallback_to_default: bool = Field(
         default=True,
         description="未识别的表情表达回退到默认表情（12951，点赞/猪猪）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
+        json_schema_extra={
+            "label": "未识别表达回退默认表情",
+            "hint": "未识别回退默认表情",
+        },
     )
 
     @field_validator("description_library", mode="before")
@@ -104,7 +116,7 @@ class EmojiReactionConfig(PluginConfigBase):
 
 
 class PigFriendsConfig(PluginConfigBase):
-    """群友是🐷：用户发消息时按概率/规则自动贴表情。"""
+    """群友是🐷（pig_friends 配置节）：自动贴表情的开关、名单与概率。"""
 
     __ui_label__ = "群友是🐷"
     __ui_icon__ = "pets"
@@ -113,57 +125,108 @@ class PigFriendsConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description="总开关：启用「群友是🐷」自动贴表情功能",
+        json_schema_extra={
+            "label": "启用自动贴表情",
+            "hint": "自动贴表情总开关",
+        },
     )
     group_list_mode: str = Field(
         default="whitelist",
         description="群名单模式：whitelist=仅以下群生效；blacklist=以下群不生效",
+        json_schema_extra={
+            "label": "群名单模式",
+            "hint": "群名单模式",
+        },
     )
     group_list: list[str] = Field(
         default_factory=list,
         description="群名单（填群号；按 group_list_mode 决定白/黑名单）",
+        json_schema_extra={
+            "label": "群名单",
+            "hint": "群号名单，留空全群",
+        },
     )
     user_list_mode: str = Field(
         default="blacklist",
         description="用户名单模式：whitelist=仅以下用户生效；blacklist=以下用户不生效",
+        json_schema_extra={
+            "label": "用户名单模式",
+            "hint": "用户名单模式",
+        },
     )
     user_list: list[str] = Field(
         default_factory=list,
         description="用户名单（填 QQ 号；按 user_list_mode 决定白/黑名单）",
+        json_schema_extra={
+            "label": "用户名单",
+            "hint": "QQ 号名单",
+        },
     )
     normal_probability: float = Field(
         default=0.05,
         description="普通用户每次发消息贴 12951 表情的概率（0~1，默认 0.05）",
+        json_schema_extra={
+            "label": "普通用户触发概率",
+            "hint": "普通用户贴表情概率",
+        },
     )
     normal_cooldown_seconds: int = Field(
         default=600,
         description="普通用户贴表情后的冷却秒数（默认 600 秒）",
+        json_schema_extra={
+            "label": "普通用户冷却（秒）",
+            "hint": "普通用户冷却时长",
+        },
     )
     pig_users: list[str] = Field(
         default_factory=list,
         description="你是那么大个🐷：这些 QQ 号不看黑白名单，每次发消息且冷却过即贴 12951",
+        json_schema_extra={
+            "label": "🐷用户名单",
+            "hint": "🐷用户不受名单限制",
+        },
     )
     pig_cooldown_seconds: int = Field(
         default=1800,
         description="🐷用户冷却秒数（默认 1800 = 30 分钟，每个 QQ 独立）",
+        json_schema_extra={
+            "label": "🐷用户冷却（秒）",
+            "hint": "🐷用户独立冷却时长",
+        },
     )
     pig_chain_skip_cooldown_probability: float = Field(
         default=0.25,
         description="🐷用户每次贴后不进冷却的概率（默认 0.25；命中则下一条消息直接贴）",
+        json_schema_extra={
+            "label": "免冷却连贴概率",
+            "hint": "免冷却连贴概率",
+        },
     )
     pig_max_chain: int = Field(
         default=3,
         description="🐷用户最多连贴的不同消息数（默认 3，第 3 个贴完停止本轮连贴）",
+        json_schema_extra={
+            "label": "最大连贴条数",
+            "hint": "一轮最多连贴条数",
+        },
     )
 
 
 class PluginSectionConfig(PluginConfigBase):
-    """插件自身配置（plugin 配置节）。"""
+    """插件（plugin 配置节）：插件级开关与配置版本。"""
 
     __ui_label__ = "插件"
     __ui_icon__ = "package"
     __ui_order__ = 0
 
-    enabled: bool = Field(default=True, description="是否启用插件")
+    enabled: bool = Field(
+        default=True,
+        description="是否启用插件",
+        json_schema_extra={
+            "label": "启用插件",
+            "hint": "插件总开关",
+        },
+    )
     config_version: str = Field(
         default=SUPPORTED_CONFIG_VERSION,
         description="配置版本（与插件版本同步，用于检查配置文件是否需要更新）",
@@ -171,6 +234,7 @@ class PluginSectionConfig(PluginConfigBase):
             "disabled": True,
             "hidden": True,
             "label": "配置版本",
+            "hint": "配置版本，勿改",
         },
     )
 
@@ -462,13 +526,25 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         for msg in messages:
             if not isinstance(msg, Mapping):
                 continue
+            # 跳过合成通知：is_notify 消息（影子适配器补投的通知等）以群友身份入库，
+            # filter_mai 拦不住；message_id 非数字（napcat-shadow-*、emoji-reaction-notice-*）
+            # 的都不是真实 QQ 消息，不能作为贴表情目标。
+            if bool(msg.get("is_notify", False)):
+                continue
             mid = str(msg.get("message_id") or "").strip()
-            if mid:
+            if mid and EmojiReactionReplacer.parse_reactable_message_id(mid) is not None:
                 return mid
         return ""
 
     async def _apply_emoji_like(self, stream_id: str, message_id: str, emoji_id: int) -> tuple[bool, str]:
         """调用 NapCat 通用 action 入口贴表情。返回 (ok, error)。"""
+        if EmojiReactionReplacer.parse_reactable_message_id(message_id) is None:
+            # 合成通知（如影子适配器补投的 napcat-shadow-*）不是真实 QQ 消息，
+            # 协议端无从贴表情：返回 LLM 可读的失败原因，而不是 int() 异常原文。
+            return False, (
+                f"目标消息(ID:{message_id})是系统通知或合成记录，不是真实QQ消息，无法贴表情；"
+                "请改为对普通聊天消息贴表情（target_message_id 留空即可自动定位最近的真实消息）"
+            )
         try:
             response = await self.ctx.api.call(
                 NAPCAT_ACTION_CALL_API,

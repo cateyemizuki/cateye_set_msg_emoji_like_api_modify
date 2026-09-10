@@ -13,7 +13,7 @@
       "group_id": 123456789,
       "user_id": 987654321,
       "operator_id": 987654321,
-      "message_id": -822208709,     # 被回应消息 ID（带符号 int32，可为负）
+      "message_id": -5238091734,     # 被回应消息 ID（带符号 int32，可为负）
       "message_seq": 867893,        # 被回应消息 msgSeq
       "likes": [{"emoji_id": "12951", "count": 1}]
     }
@@ -130,11 +130,11 @@ class EmojiLikeNoticeParser:
             {
                 "actor_user_id": "987654321",        # 谁（操作者）
                 "actor_nickname": "群友A",             # 谁（显示名，可能为空）
-                "target_message_id": "-822208709",    # 对哪条消息
+                "target_message_id": "-5238091734",    # 对哪条消息
                 "target_message_seq": "867893",        # 被回应消息 msgSeq
                 "likes": [{"emoji_id": "12951", "count": 1}],
                 "names": ["点赞"],                      # 表情名列表（解析后）
-                "summary": "群友A 对消息(ID:-822208709) 贴了 点赞",
+                "summary": "群友A 对消息(ID:-5238091734) 贴了 点赞",
             }
         """
         if not self.is_emoji_like_notice(message_dict):
