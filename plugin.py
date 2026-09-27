@@ -35,7 +35,7 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.2.3"
+SUPPORTED_CONFIG_VERSION = "0.3.0"
 
 # 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
 DEFAULT_EMOJI_ID = 12951
@@ -47,9 +47,10 @@ EVENT_TAG_NORMAL = "[事件-群消息表情回应]"
 #   聊天中用户未直接提及该行为时 LLM 应忽视该信息；若用户提及则回应为「随手贴的」。
 EVENT_TAG_PROBABILISTIC = "[事件-插件概率事件（聊天中用户未直接提及该行为则忽视该信息，如果提及该行为则回应为随手贴的）]"
 
-# NapCat 适配器插件的通用 action 入口（唯一短名）。
-# 用它直接下发 set_msg_emoji_like 动作，可传负 message_id（QQ 消息 ID 为带符号 int32），
-# 绕过 NapCat 插件专用 set_msg_emoji_like API 的正整数校验。
+# 官方适配器的通用 action 入口（NapCat 兼容命名，合并版 SnowLuma 适配器同样提供）。
+# 用它直接下发 set_msg_emoji_like 动作，可传负 message_id（QQ 消息 ID 为带符号 int32）。
+# 合并版适配器（1.0+）的专用 set_msg_emoji_like API 已原生接受负 ID，但 action.call
+# 仍是新旧适配器（1.2.x 旧版 NapCat 适配器的专用 API 校验正整数）共用的稳妥通道。
 NAPCAT_ACTION_CALL_API = "adapter.napcat.action.call"
 
 
@@ -526,8 +527,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         for msg in messages:
             if not isinstance(msg, Mapping):
                 continue
-            # 跳过合成通知：is_notify 消息（影子适配器补投的通知等）以群友身份入库，
-            # filter_mai 拦不住；message_id 非数字（napcat-shadow-*、emoji-reaction-notice-*）
+            # 跳过合成通知：is_notify 消息（适配器注入的 qq-notice-* 通知等）以群友身份入库，
+            # filter_mai 拦不住；message_id 非数字（qq-notice-*、emoji-reaction-notice-*）
             # 的都不是真实 QQ 消息，不能作为贴表情目标。
             if bool(msg.get("is_notify", False)):
                 continue
@@ -539,7 +540,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
     async def _apply_emoji_like(self, stream_id: str, message_id: str, emoji_id: int) -> tuple[bool, str]:
         """调用 NapCat 通用 action 入口贴表情。返回 (ok, error)。"""
         if EmojiReactionReplacer.parse_reactable_message_id(message_id) is None:
-            # 合成通知（如影子适配器补投的 napcat-shadow-*）不是真实 QQ 消息，
+            # 合成通知（如适配器注入的 qq-notice-*、本插件的 emoji-reaction-notice-*）不是真实 QQ 消息，
             # 协议端无从贴表情：返回 LLM 可读的失败原因，而不是 int() 异常原文。
             return False, (
                 f"目标消息(ID:{message_id})是系统通知或合成记录，不是真实QQ消息，无法贴表情；"
