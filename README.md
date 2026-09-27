@@ -3,8 +3,8 @@
 > **⚠️ 版本分支选择（2026-09-28）**：本分支（`main`）**仅支持 MaiBot 1.2.x 及以前**
 > （manifest 已限制宿主 `≤ 1.2.99`，且依赖旧版 NapCat 适配器 `maibot-team.napcat-adapter`）。
 > **若你的 MaiBot 为 1.3.0 且使用合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter`），
-> 请在插件中心下载本插件时选择**高级设置 → 分支 `compat-1.3.0`**（v0.3.0：适配器依赖已切换
-> 为合并版 SnowLuma 适配器，详见该分支 README）。
+> 请安装 **v0.3.0**（Release，适配器依赖已切换为合并版 SnowLuma 适配器）：插件中心版本
+> 列表会自动展示兼容版本，或在高级设置中选择分支 **`compat-snowluma`**（详见该分支 README）。
 
 为麦麦（MaiBot）框架的插件，让机器人可以对聊天消息**贴 QQ 表情回应（reaction）**，并把收到/发起的表情回应翻译成可读文本显示在 WebUI 聊天记录中。
 
