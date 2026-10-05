@@ -3,7 +3,8 @@
 提供：
 1. 描述库规范化（emoji_id -> 描述文本，供 LLM 工具选择）；
 2. set_msg_emoji_like 动作参数构造（message_id 保留符号，负 ID 合法）；
-3. 聊天流记录（mai_messages）构造与身份校验（换环境/人设安全）。
+3. 合成通知消息构造（MessageGateway 注入，走完整入站链入库）；
+4. 「群友是🐷」冷却/连贴状态机（PigReactState）与工具频控。
 """
 from __future__ import annotations
 
@@ -70,80 +71,6 @@ class EmojiReactionReplacer:
             "emoji_id": str(emoji_id),
             "set": bool(set_like),
         }
-
-    # ---------- 聊天流记录（写入 mai_messages） ----------
-
-    @staticmethod
-    def build_chat_record(
-        *,
-        message_id: str,
-        session_id: str,
-        stream_info: Mapping[str, Any],
-        record_text: str,
-        raw_content: Any,
-    ) -> Dict[str, Any]:
-        """构造一条可写入 mai_messages 的「贴表情记录」数据。
-
-        以机器人（self）身份写入，processed_plain_text 为记录文本，
-        raw_content 为调用方序列化好的消息段 bytes。
-
-        所有身份字段均来自运行时数据（stream_info），不做环境/人设假设；
-        关键字段缺失时由 validate_chat_record 判断是否放弃写入。
-        """
-        user_info = stream_info.get("user_info") if isinstance(stream_info.get("user_info"), Mapping) else {}
-        group_info = stream_info.get("group_info") if isinstance(stream_info.get("group_info"), Mapping) else {}
-        self_id = str(stream_info.get("self_id") or "").strip()
-        platform = str(stream_info.get("platform") or "").strip() or "qq"
-        # 机器人昵称：优先 user_info.user_nickname，缺失回退 bot_nickname，
-        # 不再写死「机器人」避免跨人设错名（缺失由校验拒绝）。
-        nickname = str(
-            user_info.get("user_nickname")
-            or stream_info.get("bot_nickname")
-            or ""
-        ).strip()
-        group_id = str(group_info.get("group_id") or "").strip()
-        group_name = str(group_info.get("group_name") or "").strip()
-
-        return {
-            "message_id": str(message_id),
-            "timestamp": __import__("datetime").datetime.now(),
-            "platform": platform,
-            "user_id": self_id,
-            "user_nickname": nickname,
-            "user_cardname": None,
-            "group_id": group_id or None,
-            "group_name": group_name or None,
-            "is_mentioned": False,
-            "is_at": False,
-            "session_id": str(session_id),
-            "reply_to": None,
-            "is_emoji": False,
-            "is_picture": False,
-            "is_command": False,
-            "is_notify": False,
-            "raw_content": raw_content,
-            "processed_plain_text": str(record_text),
-            "additional_config": None,
-            "reply_frequency": None,
-        }
-
-    @staticmethod
-    def validate_chat_record(record: Mapping[str, Any]) -> bool:
-        """校验贴表情记录是否可安全写入：身份字段缺失时返回 False（调用方放弃写入）。
-
-        避免换环境/人设后 self_id、昵称等缺失导致写入脏数据（如 user_id="0"、昵称"机器人"）。
-        """
-        if not str(record.get("message_id") or "").strip():
-            return False
-        if not str(record.get("session_id") or "").strip():
-            return False
-        if not str(record.get("user_id") or "").strip():
-            return False
-        if not str(record.get("user_nickname") or "").strip():
-            return False
-        if not str(record.get("processed_plain_text") or "").strip():
-            return False
-        return True
 
     # ---------- 合成通知消息（MessageGateway 注入，走完整入站链入库） ----------
 
@@ -232,16 +159,19 @@ class PigReactState:
     """「群友是🐷」的冷却与连贴状态机（纯内存，线程内安全）。
 
     冷却语义：
-    - normal_cooldowns: **全局冷却**（单 key，所有普通用户共享），默认 120s——
-      任意普通用户贴了一次后，120s 内其它普通用户也不能贴；
-    - pig_cooldowns: 「你是那么大个🐷」用户（**每 QQ 独立** key），默认 30min；
-    - pig_chain: 「你是那么大个🐷」用户的连贴状态（当前连贴数，免冷却链内）。
+    - normal_cooldowns: **全局冷却**（单 key，所有普通用户共享），默认 600s——
+      任意普通用户贴了一次后，600s 内其它普通用户也不能贴（0 = 禁用冷却）；
+    - pig_cooldowns: 「你是那么大个🐷」用户（**每 QQ 独立** key），默认 30min
+      （0 = 禁用冷却）；
+    - pig_chain: 「你是那么大个🐷」用户的连贴状态（当前连贴数，免冷却链内）；
+    - tool_cooldowns: `emoji_like` 工具的每会话频控（key 为 stream_id，默认 10s）。
     """
 
     def __init__(self) -> None:
         self.normal_cooldowns: Dict[str, float] = {}
         self.pig_cooldowns: Dict[str, float] = {}
         self.pig_chain: Dict[str, int] = {}  # qq -> 已连贴数（本轮免冷却链）
+        self.tool_cooldowns: Dict[str, float] = {}  # stream_id -> 冷却截止时间
 
     def _in_cooldown(self, store: Dict[str, float], key: str, now: float, cooldown_seconds: float) -> bool:
         expires = store.get(key)
@@ -294,9 +224,23 @@ class PigReactState:
         self.pig_cooldowns.pop(qq, None)  # 清除冷却，链内下一条直接贴
         return count
 
+    def tool_try_take(self, key: str, now: float, cooldown_seconds: float) -> bool:
+        """工具频控（如 `emoji_like` 每会话最小调用间隔）。
+
+        cooldown_seconds <= 0 时恒放行（不限频）；冷却期内返回 False 且**不延长**
+        冷却（与占坑型判定不同：被拒的调用不重置计时）。
+        """
+        if cooldown_seconds <= 0:
+            return True
+        expires = self.tool_cooldowns.get(key)
+        if expires is not None and expires > now:
+            return False
+        self.tool_cooldowns[key] = now + cooldown_seconds
+        return True
+
     def cleanup(self, now: float) -> None:
         """清理过期冷却（简单遍历，量小可接受）。"""
-        for store in (self.normal_cooldowns, self.pig_cooldowns):
+        for store in (self.normal_cooldowns, self.pig_cooldowns, self.tool_cooldowns):
             expired = [k for k, v in store.items() if v <= now]
             for k in expired:
                 store.pop(k, None)

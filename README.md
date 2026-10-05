@@ -1,11 +1,5 @@
 # 🐷！表情回应（MaiBot 插件）
 
-> **⚠️ 版本分支选择（2026-09-28）**：本分支（`main`）**仅支持 MaiBot 1.2.x 及以前**
-> （manifest 已限制宿主 `≤ 1.2.99`，且依赖旧版 NapCat 适配器 `maibot-team.napcat-adapter`）。
-> **若你的 MaiBot 为 1.3.0 且使用合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter`），
-> 请安装 **v0.3.0**（Release，适配器依赖已切换为合并版 SnowLuma 适配器）：插件中心版本
-> 列表会自动展示兼容版本，或在高级设置中选择分支 **`compat-snowluma`**（详见该分支 README）。
-
 为麦麦（MaiBot）框架的插件，让机器人可以对聊天消息**贴 QQ 表情回应（reaction）**，并把收到/发起的表情回应翻译成可读文本显示在 WebUI 聊天记录中。
 
 ### 效果演示
@@ -18,20 +12,27 @@
 - **表情回应通知翻译**：拦截 NapCat 的 `group_msg_emoji_like` 通知，翻译为「谁 对哪条消息 贴了 什么表情」，注入框架内部。
 - **群友是🐷**：用户发消息时按概率/规则自动贴表情（可配置黑白名单、冷却、猪友专属连贴机制）。
 
-本插件**必需依赖 NapCat 适配器**（`maibot-team.napcat-adapter`，已在 `_manifest.json` 的 `dependencies` 中声明）提供 `set_msg_emoji_like` / `adapter.napcat.action.call` API。**未安装该适配器时插件不会被加载**（由 Host 依赖流水线阻止）。已实测兼容 **SnowLuma 适配器**（本体 + 官方 NapCat 插件）环境：表情回应通知翻译复用 NapCat 插件的 `group_msg_emoji_like` 通知格式；贴表情能力仅由 NapCat 适配器提供（SnowLuma 自带的通知翻译与其不冲突）。
+本插件**依赖官方合并版 SnowLuma 适配器**：`_manifest.json` 声明 `maibot-team.snowluma-adapter >=1.0.0,<2.0.0` 插件依赖（0.3.0 起）。只调适配器公开接口（`adapter.napcat.action.call` / `adapter.napcat.system.get_login_info` 等），未修改官方代码。
+
+- **为什么声明依赖**：① 适配器插件 ID 自合并版起变更为 `maibot-team.snowluma-adapter`，旧的 `maibot-team.napcat-adapter` 依赖在 MaiBot 1.3.0 下会因「依赖未满足」阻止本插件加载；② 按 [v1.3.0 开发文档 §4.3](https://github.com/Mai-with-u/MaiBot) 建议，调用适配器 API 的插件声明 `type: "plugin"` 依赖可获得**启动顺序保证**（适配器先于本插件启动，避免加载竞态）。
+- **适配器能力面**：合并版适配器复用 `adapter.napcat.*` 命名空间（171 个公开 API 含通用 action 入口），表情回应通知格式不变（`additional_config` 仍携带 `napcat_notice_type / napcat_notice_sub_type / napcat_notice_payload` 兼容字段）。
+- **未安装适配器时**：插件不会被加载（Host 依赖流水线报「依赖未满足」）。合并版适配器宿主区间为 `1.2.0 ~ 1.3.99`，1.2.x 环境同样可安装该适配器；仅装旧版 NapCat 适配器（`maibot-team.napcat-adapter`）的 1.2.x 环境请继续使用本插件 0.2.3。
+
+> 历史：0.2.3 及之前版本依赖 `maibot-team.napcat-adapter`；0.3.0 起正式依赖合并版 SnowLuma 适配器。
 
 目前如果使用中发现maibot没有正确收到回应信息，且观察maibot日志中出现类似
 
 >08-27 20:08:32 [平台接入管理] 忽略重复入站消息: dedupe_key=gateway:maibot-team.napcat-adapter:napcat_gateway:3159826047
 
-需要自行修改napcat适配器插件的内部拦截规则或等待官方更新适配器
+这是 MaiBot 1.2.x + 旧版适配器的已知缺陷（通知去重键误用，Napcat-Adapter issue #97），**合并版适配器 1.0.x 已修复**（去重键改为事件级摘要），请升级适配器而非改内部拦截规则。
 
 ## 功能特性
 
-- **贴表情（`emoji_like` 工具）**：模型可对聊天中的某条消息贴 QQ 表情回应，默认贴到最近一条非机器人消息（自动跳过系统通知/合成消息，如影子适配器补投的 `napcat-shadow-*` 通知——它们不是真实 QQ 消息，无法贴表情）。支持从「描述库」按描述选择表情，或直接给表情 ID；未指定时使用默认表情（点赞）。
+- **贴表情（`emoji_like` 工具）**：模型可对聊天中的某条消息贴 QQ 表情回应，默认贴到最近一条非机器人消息（自动跳过系统通知/合成消息，如适配器注入的 `qq-notice-*` 通知与本插件自己的 `emoji-reaction-notice-*` 记录——它们不是真实 QQ 消息，无法贴表情）。支持从「描述库」按描述选择表情，或直接给表情 ID；未指定时使用默认表情（点赞）。
 - **表情查询（`emoji_like_list` 工具）**：模型调用 `emoji_like` 前可先查询当前配置的可用表情（表情名 + ID + 描述），避免凭印象编造表情表达或 ID。`emoji_like` 的描述已引导模型先查询再调用。
 - **默认描述库**：内置 11 个代表性表情（12951 祝(猪)、14 微笑、21 可爱、46 猪头、66 爱心、76 赞、174 无奈、182 笑哭、271 吃瓜、319 比心、357 裂开），覆盖常见情绪/互动场景，可直接在配置中增删改。
 - **失败自动回退**：`emoji_reaction.allow_fallback_to_default`（默认开启）——模型传入描述库外的情绪词（如「开心」「俏皮」）或无效表情时，自动回退到默认表情 12951，不再报「未识别的表情表达」错误。
+- **工具频控**：`emoji_reaction.tool_cooldown_seconds`（默认 10 秒，0 = 不限频）——`emoji_like` 每个会话有最小调用间隔，超限时返回「贴表情太频繁」提示，防止失控模型或提示注入诱导短时间内反复贴表情刷屏。
 - **动作入库显示**：贴表情动作会以 `[事件-群消息表情回应] 机器人名 对消息(ID:xxx)贴了表情：描述` 的合成通知形式**注入聊天流**（WebUI 可见、不真发到群里、不触发 LLM 回复）。**「群友是🐷」概率自动触发的贴表情**则使用 `[事件-插件概率事件（聊天中用户未直接提及该行为则忽视该信息，如果提及该行为则回应为随手贴的）]` 前缀，提示 LLM 这是概率行为：用户未直接提及则忽视，提及则回应为「随手贴的」。
 - **表情回应通知翻译**：群友贴表情时，插件把原始通知翻译为 `[事件-群消息表情回应] 群友名 对消息(ID:xxx)表达了 表情名` 并注入框架：
   - 表情名来自内置对照表（QQ 官方 / NapCat / SnowLuma 多源合并，含 JSON 自定义扩展）；
@@ -46,7 +47,7 @@
 
 1. 将本插件目录（含 `_manifest.json`、`plugin.py`、`notice_translator.py`、`emoji_reaction_replacer.py`、`emoji_map/` 等文件）放入 MaiBot 的 `plugins/` 目录。
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
-3. **必须先安装并启用 NapCat 适配器**（`maibot-team.napcat-adapter`，插件中心的官方适配器），并确保其已连接到 NapCat / SnowLuma 本体。本插件 `_manifest.json` 已声明该插件级依赖，缺失时插件不会加载。
+3. **安装并启用官方合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter` 1.0+，已内置 NapCat 完整 API 面，宿主区间 1.2.0 ~ 1.3.99），并确保其已连接到协议端。本插件 0.3.0 起声明该插件级依赖：适配器缺失时插件不会加载；仅装旧版 NapCat 适配器的 1.2.x 环境请使用本插件 0.2.3。
 
 > 兼容性声明：`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
 
@@ -57,7 +58,7 @@
 ```toml
 [plugin]
 enabled = true
-config_version = "0.2.1"
+config_version = "0.3.1"
 
 [emoji]
 optimize_unknown_emoji = false   # 未知表情优化：true=显示「一个表情」；false=显示「未知表情<id>」
@@ -77,6 +78,7 @@ description_library = [
     "357: 崩溃、无语、心态爆炸",
 ]
 allow_fallback_to_default = true  # 未识别的表情表达回退到默认表情（12951），默认开启
+tool_cooldown_seconds = 10        # emoji_like 每会话最小调用间隔（秒，0 = 不限频）
 
 [pig_friends]
 enabled = false                       # 「群友是🐷」总开关
@@ -85,9 +87,9 @@ group_list = []                       # 群名单（群号）
 user_list_mode = "blacklist"          # 用户名单模式：whitelist / blacklist
 user_list = []                        # 用户名单（QQ 号）
 normal_probability = 0.05             # 普通用户自动贴表情概率（0~1）
-normal_cooldown_seconds = 600         # 普通用户贴后全局冷却（秒）
+normal_cooldown_seconds = 600         # 普通用户贴后全局冷却（秒，0 = 禁用冷却）
 pig_users = []                        # 猪友 QQ 号列表（无视黑白名单与概率）
-pig_cooldown_seconds = 1800           # 猪友独立冷却（秒，每个 QQ 独立）
+pig_cooldown_seconds = 1800           # 猪友独立冷却（秒，每个 QQ 独立，0 = 禁用冷却）
 pig_chain_skip_cooldown_probability = 0.25  # 猪友贴后免冷却连贴概率（0~1）
 pig_max_chain = 3                     # 猪友最多连贴条数
 ```
@@ -97,7 +99,7 @@ pig_max_chain = 3                     # 猪友最多连贴条数
   1. 供 `emoji_like` 工具按描述选表情（如「猪猪表情」→ 12951）；
   2. 表情回应通知翻译时，若该 ID 命中描述库，则显示 `表达了 表情名：描述`（表情名来自对照表）。**兼容旧格式**：也接受 JSON 字符串（`"{\"12951\": \"...\"}"`）或字典（旧配置自动迁移）。
 - `emoji_reaction.allow_fallback_to_default`：**未识别的表情表达回退**。开启（默认）后，`emoji_like` 收到描述库外的表达（如「开心」「俏皮」）或无效文本时，自动改用默认表情 12951 贴出并提示，不再返回失败；关闭后保持旧行为（返回「未识别的表情表达」错误）。
-- `pig_friends.*`：群友是🐷 的各项参数（见「功能特性」）。`pig_users` 中的 QQ 号**不受黑白名单与概率限制**，但群/用户黑白名单仍会先于猪友判定执行。
+- `pig_friends.*`：群友是🐷 的各项参数（见「功能特性」）。`pig_users` 中的 QQ 号**无视黑白名单与概率限制**：猪友判定先于群/用户名单执行，命中猪友名单即跳过名单检查、冷却过直接贴；普通用户则仍需先过群/用户名单再按概率触发。冷却秒数（`normal_cooldown_seconds` / `pig_cooldown_seconds`）配 `0` 表示禁用冷却。
 
 ## 使用说明
 
@@ -140,7 +142,7 @@ cateye_set_msg_emoji_like_api_modify/
 ├── _manifest.json              # 插件元信息（Manifest v2）
 ├── plugin.py                   # 插件主体（配置 / 工具 / Hook / 网关 / 群友是🐷）
 ├── notice_translator.py        # 表情回应通知翻译核心逻辑
-├── emoji_reaction_replacer.py  # 贴表情核心逻辑（描述库 / 参数 / 聊天记录 / 冷却状态机）
+├── emoji_reaction_replacer.py  # 贴表情核心逻辑（描述库 / 参数 / 合成通知 / 冷却状态机）
 ├── emoji_map/                  # QQ 表情 ID → 名称映射表与解析器
 │   ├── qq_emoji_resolver.py    # 解析器（分层加载：内置合并 + JSON 覆盖）
 │   ├── qq_face_merged.json     # 多源合并映射
@@ -166,8 +168,7 @@ cateye_set_msg_emoji_like_api_modify/
 ## 致谢与来源
 
 - **`TAIY2020/smart_poke_plugin`**（[GitHub](https://github.com/TAIY2020/smart_poke_plugin)）：参考其「机器人自戳通知自动入库」机制，实现了本插件的 MessageGateway 注入合成通知（WebUI 显示不真发）。
-- **`maibot-team.napcat-adapter`**（MaiBot 官方 NapCat 适配器插件）：提供 `adapter.napcat.action.call` 通用入口与 `set_msg_emoji_like` 动作、`get_login_info` 等 API，本插件只使用其公开接口，未修改官方代码。
-- **MaiBot-SnowLuma-Adapter**（官方 SnowLuma 适配器）：表情回应通知格式（`group_msg_emoji_like`）与昵称错配排查的参考。
+- **MaiBot-SnowLuma-Adapter（合并版）**（官方适配器，`maibot-team.snowluma-adapter` 1.0+，已合并 NapCat 适配器）：提供 `adapter.napcat.action.call` 通用入口、`set_msg_emoji_like` 动作、`get_login_info` 等 API 与表情回应通知格式（`group_msg_emoji_like`），本插件只使用其公开接口，未修改官方代码；0.3.0 起为本插件的声明依赖。
 - **[Undefined 项目](https://github.com/69gg/Undefined)**：`qq_emoji.py` 的表情映射 JSON 覆盖扩展机制，本插件 `emoji_map/` 沿用该思路（反向 id→名称）。
 - **QQ 官方机器人文档**（[Emoji 列表](https://bot.q.qq.com/wiki/develop/nodesdk/model/emoji.html)）：系统表情 ID 权威来源。
 - 插件基于 [MaiBot 插件开发文档](https://docs.mai-mai.org/plugin/) 与 [maibot-plugin-sdk](https://github.com/Mai-with-u/maibot-plugin-sdk) 开发。

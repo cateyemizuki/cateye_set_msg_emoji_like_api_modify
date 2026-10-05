@@ -35,10 +35,13 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.2.3"
+SUPPORTED_CONFIG_VERSION = "0.3.1"
 
 # 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
 DEFAULT_EMOJI_ID = 12951
+
+# emoji_id 合法范围上限：QQ 表情 ID 为非负 int32（越界 ID 不透传给协议端）
+MAX_EMOJI_ID = 2**31 - 1
 
 # 事件文本前缀：
 # - 常规事件（LLM 工具调用贴表情 / 群友贴表情通知翻译）：
@@ -47,9 +50,10 @@ EVENT_TAG_NORMAL = "[事件-群消息表情回应]"
 #   聊天中用户未直接提及该行为时 LLM 应忽视该信息；若用户提及则回应为「随手贴的」。
 EVENT_TAG_PROBABILISTIC = "[事件-插件概率事件（聊天中用户未直接提及该行为则忽视该信息，如果提及该行为则回应为随手贴的）]"
 
-# NapCat 适配器插件的通用 action 入口（唯一短名）。
-# 用它直接下发 set_msg_emoji_like 动作，可传负 message_id（QQ 消息 ID 为带符号 int32），
-# 绕过 NapCat 插件专用 set_msg_emoji_like API 的正整数校验。
+# 官方适配器的通用 action 入口（NapCat 兼容命名，合并版 SnowLuma 适配器同样提供）。
+# 用它直接下发 set_msg_emoji_like 动作，可传负 message_id（QQ 消息 ID 为带符号 int32）。
+# 合并版适配器（1.0+）的专用 set_msg_emoji_like API 已原生接受负 ID，但 action.call
+# 仍是新旧适配器（1.2.x 旧版 NapCat 适配器的专用 API 校验正整数）共用的稳妥通道。
 NAPCAT_ACTION_CALL_API = "adapter.napcat.action.call"
 
 
@@ -97,6 +101,15 @@ class EmojiReactionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "未识别表达回退默认表情",
             "hint": "未识别回退默认表情",
+        },
+    )
+
+    tool_cooldown_seconds: float = Field(
+        default=10.0,
+        description="emoji_like 工具每个会话的最小调用间隔秒数（防刷屏频控，默认 10 秒；0 = 不限频）",
+        json_schema_extra={
+            "label": "贴表情工具冷却（秒）",
+            "hint": "每会话最小调用间隔",
         },
     )
 
@@ -172,7 +185,7 @@ class PigFriendsConfig(PluginConfigBase):
     )
     normal_cooldown_seconds: int = Field(
         default=600,
-        description="普通用户贴表情后的冷却秒数（默认 600 秒）",
+        description="普通用户贴表情后的冷却秒数（默认 600 秒；0 = 禁用冷却）",
         json_schema_extra={
             "label": "普通用户冷却（秒）",
             "hint": "普通用户冷却时长",
@@ -188,7 +201,7 @@ class PigFriendsConfig(PluginConfigBase):
     )
     pig_cooldown_seconds: int = Field(
         default=1800,
-        description="🐷用户冷却秒数（默认 1800 = 30 分钟，每个 QQ 独立）",
+        description="🐷用户冷却秒数（默认 1800 = 30 分钟，每个 QQ 独立；0 = 禁用冷却）",
         json_schema_extra={
             "label": "🐷用户冷却（秒）",
             "hint": "🐷用户独立冷却时长",
@@ -265,6 +278,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         self._notice_parser = EmojiLikeNoticeParser(emoji_resolver=QQEmojiResolver())  # 表情回应通知解析器（内含表情映射）
         self._replacer = EmojiReactionReplacer()  # 贴表情核心逻辑（描述库/参数/聊天记录）
         self._pig_state = PigReactState()  # 「群友是🐷」冷却与连贴状态
+        self._pig_state_last_cleanup = 0.0  # 上次冷却状态清理时间（每小时低频清理一次）
         self._bot_nickname_cache: Dict[str, Any] = {"value": "", "expires": 0.0}  # 机器人昵称缓存
 
     # ==================== MessageGateway：注入合成通知 ====================
@@ -383,6 +397,17 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         if not stream_id:
             return {"success": False, "error": "缺少 stream_id，无法贴表情"}
 
+        # 0. 频控：每会话最小调用间隔（防失控模型/提示注入诱导刷屏；0 = 不限频）
+        try:
+            tool_cooldown = float(self.config.emoji_reaction.tool_cooldown_seconds)
+        except (TypeError, ValueError):
+            tool_cooldown = 10.0
+        if tool_cooldown < 0:
+            tool_cooldown = 10.0
+        if tool_cooldown > 0 and not self._pig_state.tool_try_take(stream_id, time.time(), tool_cooldown):
+            error_text = "贴表情太频繁，请稍等片刻后再试"
+            return {"success": False, "error": error_text, "content": error_text}
+
         # 1. 解析表情 ID（描述库匹配 or 直接数字；失败回退默认表情）
         emoji_id, fallback_used = self._resolve_emoji_id(emoji_raw)
         if emoji_id is None:
@@ -459,6 +484,17 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 self.ctx.logger.warning("description_library JSON 解析失败，使用默认：%r", raw[:80])
         return self._replacer.normalize_description_library(parsed or DEFAULT_DESCRIPTION_LIBRARY)
 
+    @staticmethod
+    def _safe_emoji_id(value: Any) -> Optional[int]:
+        """把输入解析为合法表情 ID（非负 int32）；非法或越界返回 None。"""
+        try:
+            emoji_id = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        if 0 <= emoji_id <= MAX_EMOJI_ID:
+            return emoji_id
+        return None
+
     def _resolve_emoji_id(self, emoji_raw: str) -> tuple[Optional[int], bool]:
         """解析表情：表情名反查 → 描述库文本匹配 → 数字直接转 int → 失败回退默认表情。
 
@@ -480,22 +516,25 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             resolver = self._notice_parser.emoji_resolver
             for emoji_id in library:
                 if str(resolver.resolve(emoji_id)) == emoji_raw:
-                    return int(emoji_id), False
+                    emoji_id_num = self._safe_emoji_id(emoji_id)
+                    if emoji_id_num is not None:
+                        return emoji_id_num, False
         except Exception:
             pass
 
-        # 2. 描述库：值匹配（描述文本）
-        for emoji_id, desc in library.items():
-            if emoji_raw == desc or emoji_raw in desc or desc in emoji_raw:
-                try:
-                    return int(emoji_id), False
-                except (TypeError, ValueError):
-                    continue
-        # 3. 直接数字
-        try:
-            return int(emoji_raw), False
-        except (TypeError, ValueError):
-            pass
+        # 2. 描述库：值匹配（描述文本）。精确匹配优先；子串匹配仅认
+        #    「输入包含于描述」单向、且要求输入 ≥2 字符——避免「猪」这类
+        #    单字/宽泛词经双向子串模糊命中多条或意外条目。
+        if len(emoji_raw) >= 2:
+            for emoji_id, desc in library.items():
+                if emoji_raw == desc or emoji_raw in desc:
+                    emoji_id_num = self._safe_emoji_id(emoji_id)
+                    if emoji_id_num is not None:
+                        return emoji_id_num, False
+        # 3. 直接数字（范围校验：QQ 表情 ID 为非负 int32，越界视为无效走回退）
+        numeric_id = self._safe_emoji_id(emoji_raw)
+        if numeric_id is not None:
+            return numeric_id, False
         # 4. 无法识别 → 是否回退默认表情（防止 LLM 传情绪词「开心」「俏皮」等导致失败）
         if self.config.emoji_reaction.allow_fallback_to_default:
             self.ctx.logger.info(
@@ -526,8 +565,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         for msg in messages:
             if not isinstance(msg, Mapping):
                 continue
-            # 跳过合成通知：is_notify 消息（影子适配器补投的通知等）以群友身份入库，
-            # filter_mai 拦不住；message_id 非数字（napcat-shadow-*、emoji-reaction-notice-*）
+            # 跳过合成通知：is_notify 消息（适配器注入的 qq-notice-* 通知等）以群友身份入库，
+            # filter_mai 拦不住；message_id 非数字（qq-notice-*、emoji-reaction-notice-*）
             # 的都不是真实 QQ 消息，不能作为贴表情目标。
             if bool(msg.get("is_notify", False)):
                 continue
@@ -538,8 +577,16 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
 
     async def _apply_emoji_like(self, stream_id: str, message_id: str, emoji_id: int) -> tuple[bool, str]:
         """调用 NapCat 通用 action 入口贴表情。返回 (ok, error)。"""
+        if not str(stream_id or "").strip():
+            # 无会话 ID：api.call 或许能发出，但后续记录注入必然失败——统一提前拒绝
+            return False, "缺少会话信息，无法贴表情"
+        emoji_id_num = self._safe_emoji_id(emoji_id)
+        if emoji_id_num is None:
+            # 表情 ID 必须是非负 int32，越界 ID 不透传给协议端（防无效调用）
+            return False, "表情 ID 无效或超出有效范围，请用 emoji_like_list 查询可用表情"
+        emoji_id = emoji_id_num
         if EmojiReactionReplacer.parse_reactable_message_id(message_id) is None:
-            # 合成通知（如影子适配器补投的 napcat-shadow-*）不是真实 QQ 消息，
+            # 合成通知（如适配器注入的 qq-notice-*、本插件的 emoji-reaction-notice-*）不是真实 QQ 消息，
             # 协议端无从贴表情：返回 LLM 可读的失败原因，而不是 int() 异常原文。
             return False, (
                 f"目标消息(ID:{message_id})是系统通知或合成记录，不是真实QQ消息，无法贴表情；"
@@ -606,7 +653,12 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                     notice_message,
                     route_metadata={"self_id": stream_info.get("self_id") or ""},
                     external_message_id=str(notice_message.get("message_id") or ""),
-                    dedupe_key=f"emoji-reaction-{stream_id}-{message_id}-{emoji_id}",
+                    # dedupe_key 附带分钟级时间片：同一条消息第二次贴同款表情
+                    # （合法重复）不会被旧键去重吞掉记录注入
+                    dedupe_key=(
+                        f"emoji-reaction-{stream_id}-{message_id}-{emoji_id}-"
+                        f"{int(time.time() // 60)}"
+                    ),
                 )
                 if accepted:
                     self.ctx.logger.info("贴表情记录已注入聊天流：%s", record_text)
@@ -657,8 +709,6 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                         stream_info["platform"] = str(msg.get("platform") or "qq")
                         stream_info["self_id"] = str(additional.get("self_id") or additional.get("platform_io_account_id") or "")
                         stream_info["group_info"] = group_info
-                        if stream_info.get("group_info") and not stream_info.get("group_info").get("group_name"):
-                            pass
         except Exception as exc:
             self.ctx.logger.warning("获取流信息失败（stream=%s）：%s", stream_id, exc)
         if not stream_info.get("self_id"):
@@ -705,9 +755,9 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
     async def hook_pig_friends_listener(self, message: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
         """拦截用户入站消息，判定是否自动贴表情。
 
-        流程：总开关 → 群名单 → 用户名单 → 🐷用户/普通用户分流 → 冷却 → 贴表情。
-        - 🐷用户：不看黑白名单，冷却过即贴（独立冷却，连贴链）；
-        - 普通用户：0.05 概率贴 1 个 → 120s 冷却。
+        流程：总开关 → 猪友判定 →（仅普通用户）群名单 → 用户名单 → 冷却 → 贴表情。
+        - 🐷用户：无视黑白名单、不看概率，冷却过即贴（独立冷却，连贴链）；
+        - 普通用户：先过群/用户名单，再按概率贴 1 个 → 默认 600s 冷却（0 = 禁用冷却）。
         贴表情走标准流程（_apply_emoji_like + _record_and_context）。
         """
         del kwargs
@@ -739,20 +789,31 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             return
         # 私聊无 group_id
         stream_id = str(message.get("session_id") or "")
+        if not stream_id:
+            # 无会话 ID：贴表情与记录注入都无法进行，直接跳过
+            return
 
         cfg = self.config.pig_friends
         now = time.time()
 
-        # 群名单（先验证群号；私聊 group_id 空 → 无群校验，直接过）
-        if group_id:
-            if not EmojiReactionReplacer.is_allowed_by_list(group_id, cfg.group_list, cfg.group_list_mode):
-                return
-        # 用户名单（后验证 QQ 号）
-        if not EmojiReactionReplacer.is_allowed_by_list(user_id, cfg.user_list, cfg.user_list_mode):
-            return
+        # 低频清理过期冷却状态（每小时一次），防止长期运行内存缓慢增长
+        if now - self._pig_state_last_cleanup > 3600.0:
+            self._pig_state_last_cleanup = now
+            self._pig_state.cleanup(now)
 
         pig_qqs = {str(x).strip() for x in (cfg.pig_users or []) if str(x).strip()}
         is_pig = user_id in pig_qqs
+
+        # 猪友无视黑白名单：命中猪友名单即跳过群/用户名单检查直接走猪友分支；
+        # 仅普通用户路径需要先过两级名单
+        if not is_pig:
+            # 群名单（先验证群号；私聊 group_id 空 → 无群校验，直接过）
+            if group_id:
+                if not EmojiReactionReplacer.is_allowed_by_list(group_id, cfg.group_list, cfg.group_list_mode):
+                    return
+            # 用户名单（后验证 QQ 号）
+            if not EmojiReactionReplacer.is_allowed_by_list(user_id, cfg.user_list, cfg.user_list_mode):
+                return
 
         # 目标消息：当前用户消息本身（标准流程贴到用户消息）
         target_message_id = str(message.get("message_id") or "").strip()
@@ -777,7 +838,13 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             return
         if random.random() > prob:
             return
-        cooldown = max(0, int(cfg.normal_cooldown_seconds or 120))
+        # 显式校验：非法/负值回退默认 600s；0 = 禁用冷却（命中概率即贴）
+        try:
+            cooldown = int(cfg.normal_cooldown_seconds)
+        except (TypeError, ValueError):
+            cooldown = 600
+        if cooldown < 0:
+            cooldown = 600
         # 全局冷却判定 + 占坑（所有普通用户共享，原子）
         if not self._pig_state.normal_try_take(now, cooldown):
             return
@@ -792,7 +859,13 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         触发时 pig_chain_active 判定 → 直接贴（不再判冷却/概率）→ 贴后再次 0.25
         判定是否继续链；链计数达 max_chain 时退出链（恢复正常冷却流程）。
         """
-        cooldown = max(0, int(cfg.pig_cooldown_seconds or 1800))
+        # 显式校验：非法/负值回退默认 1800s；0 = 禁用冷却
+        try:
+            cooldown = int(cfg.pig_cooldown_seconds)
+        except (TypeError, ValueError):
+            cooldown = 1800
+        if cooldown < 0:
+            cooldown = 1800
         chain_max = max(1, int(cfg.pig_max_chain or 3))
         skip_prob = max(0.0, min(1.0, float(cfg.pig_chain_skip_cooldown_probability or 0.25)))
 
@@ -900,7 +973,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
     def _check_config_version(self) -> None:
         """检测配置版本并自动兼容旧版配置文件。
 
-        当前版本：0.1.0。Runner 在配置注入时已按默认值自动补齐
+        Runner 在配置注入时已按默认值自动补齐
         config_version 等缺失字段，这里仅做日志提示。
         """
         try:

@@ -1,5 +1,68 @@
 # 更新日志
 
+## 0.3.1（2026-09-29）
+
+**安全与规范审查修复版：行为一致性 + 健壮性打磨，无新功能。**
+
+- **行为变更：「群友是🐷」猪友现在真正无视黑白名单**。此前实现中群/用户名单过滤先于
+  猪友判定执行，与配置描述「这些 QQ 号不看黑白名单」矛盾；现改为猪友判定提前——命中
+  `pig_users` 即跳过群/用户名单检查直接走猪友分支，仅普通用户路径先过两级名单。
+  README 相关表述同步更正。
+- **修复：冷却秒数配 `0` 无法禁用冷却**。普通/猪友冷却解析由 `or 兜底` 改为显式校验：
+  `0` = 禁用冷却（命中概率/冷却过即贴），负数或非法值回退默认（600s / 1800s）；
+  配置 description、`PigReactState` 与 Hook docstring 的默认值口径同步更正（清理遗留的「120s」旧默认）。
+- **新增：`emoji_like` 工具频控**。新配置 `emoji_reaction.tool_cooldown_seconds`
+  （默认 10 秒，0 = 不限频）：每个会话最小调用间隔，超限返回「贴表情太频繁」的 LLM 可读
+  提示，防止失控模型或提示注入诱导短时间内反复贴表情刷屏。
+- **修复：冷却状态清理缺失**。`PigReactState.cleanup()` 现由「群友是🐷」Hook 入口每小时
+  低频调用一次（含新增的工具频控表），长期运行不再内存缓慢增长。
+- **清理与健壮性**：
+  - 删除死代码 `build_chat_record` / `validate_chat_record`（v0.3.0 改走合成通知注入后遗留）
+    与 `_fetch_stream_info` 中的空 `pass` 分支；
+  - `_resolve_emoji_id` 描述库匹配收紧：去掉「描述包含于输入」的反向子串，子串匹配要求
+    输入 ≥2 字符且单向（输入包含于描述），避免「猪」这类单字宽泛词模糊命中多条；
+  - `emoji_id` 全链路范围校验（非负 int32，上限 2^31-1）：数字直传、描述库反查、
+    `set_msg_emoji_like` 参数构造三处把关，越界 ID 不再透传协议端（走回退/报错）；
+  - `session_id` 为空时提前拒绝贴表情（Hook 判定与 `_apply_emoji_like` 双处），
+    不再出现「表情贴出但记录注入必然失败」的半成品调用；
+  - 记录注入 `dedupe_key` 附带分钟级时间片：同一条消息第二次贴同款表情（合法重复）
+    不再被去重吞掉 WebUI 记录。
+- README 配置示例 `config_version` 更正为 0.3.1（原示例停留在 0.2.1）。
+
+## 0.3.0（2026-09-28）
+
+**MaiBot 1.3.0 兼容版本：适配器依赖切换到合并版 SnowLuma 适配器。**
+
+- **适配器依赖切换**（`_manifest.json` `dependencies`）：旧声明 `maibot-team.napcat-adapter
+  >=1.0.0` → **`maibot-team.snowluma-adapter >=1.0.0,<2.0.0`**。合并版适配器（1.0.x，随
+  MaiBot 1.3.0 发布，已合并 NapCat 适配器）插件 ID 已变更，旧声明在 1.3.0 下会因 Host
+  依赖流水线报「依赖未满足: maibot-team.napcat-adapter (未找到依赖插件)」而**阻止本插件
+  加载**。切换后同时获得适配器先于本插件的启动顺序保证（v1.3.0 开发文档 §4.3 建议）。
+  注意：仅装旧版 NapCat 适配器（`maibot-team.napcat-adapter`）的 1.2.x 环境无法加载本
+  0.3.0（合并版适配器宿主区间 1.2.0 ~ 1.3.99，1.2.x 也可改装合并版；如需维持旧组合请用 0.2.3）。
+- **兼容性核查（对照合并版适配器 1.0.2 源码）**，全部通过：
+  - `adapter.napcat.action.call`（apis/support.py:249）：`params={...}` 包装支持，负 `message_id`
+    原样透传；动作失败时适配器侧抛 RuntimeError（services/action_service.py:56-58），本插件
+    try/except 与 status/retcode 双路径兜底均覆盖；
+  - 通知注入结构（codecs/notice/message_codec.py）：`additional_config` 仍携带
+    `napcat_notice_type / napcat_notice_sub_type / napcat_notice_payload / self_id`，`is_notify=True`，
+    与翻译器逐字段吻合；
+  - `adapter.napcat.system.get_login_info` 存在且返回结构兼容（`data.nickname` 取昵称）；
+  - `gateway.route_message` / `gateway.update_state` 对应的宿主 RPC（`host.route_message` /
+    `host.update_message_gateway_state`）在 1.3.0 均在；能力注册表无增删。
+- **不再需要的功能/产物**（随本次清理）：
+  - 旧版 NapCat 适配器「专用 `set_msg_emoji_like` API 校验正整数、必须走 action.call 绕道」的
+    前提已消失——合并版适配器 `_normalize_message_id`（apis/support.py:113）原生接受负 ID；
+    action.call 通道保留，注释同步更新；
+  - 「影子适配器补投的 `napcat-shadow-*` 通知」语境过时（影子适配器已随 1.3.0 退役）：合成消息
+    跳过逻辑本身保留（`qq-notice-*`、`emoji-reaction-notice-*` 等合成 ID 仍需跳过）；
+  - 删除两份已完成使命的 issue 草稿：`SNOWLUMA_ADAPTER_PASSTHROUGH_API_ISSUE_DRAFT.md`
+    （对应透传 feat，已在合并版适配器落地）与 `emoji_map/NAPCAT_DEDUPE_ISSUE_DRAFT.md`
+    （对应去重缺陷 #97，已在合并版适配器修复）；`emoji_map/SNOWLUMA_ISSUE_DRAFT.md`
+    （表情映射表错位）修复状态未确认，保留。
+- README（依赖说明/安装步骤/致谢）、manifest description、`SUPPORTED_CONFIG_VERSION`
+  同步更新。功能逻辑零改动。
+
 ## 0.2.3（2026-09-07）
 
 - 为全部配置项补充/完善了用户友好的中文注释与说明（悬停提示），完善配置节说明；插件功能与行为不变。
