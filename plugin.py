@@ -57,6 +57,18 @@ EVENT_TAG_PROBABILISTIC = "[事件-插件概率事件（聊天中用户未直接
 NAPCAT_ACTION_CALL_API = "adapter.napcat.action.call"
 
 
+def _ui_i18n(en_label: str, en_hint: str = "") -> Dict[str, Dict[str, Dict[str, str]]]:
+    """字段级英文翻译（并入 json_schema_extra；WebUI 按 i18n[locale]['label'/'hint'] 取用）。
+
+    zh-CN 文案即字段本身的 label/hint（中文），无需重复；此处仅补充 en，
+    满足 WebUI 元数据要求（每个字段至少提供 en 的 label/hint）。
+    """
+    entry: Dict[str, str] = {"label": en_label}
+    if en_hint:
+        entry["hint"] = en_hint
+    return {"i18n": {"en": entry}}
+
+
 # ==================== 配置模型 ====================
 
 
@@ -64,6 +76,9 @@ class EmojiLikeConfig(PluginConfigBase):
     """表情（emoji 配置节）：表情展示与未知表情显示方式。"""
 
     __ui_label__ = "表情"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Emoji Display", "description": "Emoji display and unknown-emoji rendering."}
+    }
     __ui_icon__ = "sentiment_satisfied"
     __ui_order__ = 1
 
@@ -73,6 +88,7 @@ class EmojiLikeConfig(PluginConfigBase):
         json_schema_extra={
             "label": "优化未知表情显示",
             "hint": "未知表情显示优化",
+            **_ui_i18n("Optimize unknown emoji display", "Show unknown emoji as 'an emoji'"),
         },
     )
 
@@ -81,6 +97,9 @@ class EmojiReactionConfig(PluginConfigBase):
     """贴表情工具（emoji_reaction 配置节）：描述库与回退行为。"""
 
     __ui_label__ = "贴表情工具"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Emoji Reaction Tool", "description": "Description library and fallback behavior."}
+    }
     __ui_icon__ = "swap_horiz"
     __ui_order__ = 2
 
@@ -92,6 +111,7 @@ class EmojiReactionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "描述库",
             "hint": "表情描述库，一行一条",
+            **_ui_i18n("Description library", "One 'emoji_id: description' entry per line"),
         },
     )
 
@@ -101,6 +121,7 @@ class EmojiReactionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "未识别表达回退默认表情",
             "hint": "未识别回退默认表情",
+            **_ui_i18n("Fallback to default emoji", "Use default emoji (12951) when unrecognized"),
         },
     )
 
@@ -110,6 +131,7 @@ class EmojiReactionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "贴表情工具冷却（秒）",
             "hint": "每会话最小调用间隔",
+            **_ui_i18n("Tool cooldown (seconds)", "Min per-stream call interval"),
         },
     )
 
@@ -132,6 +154,9 @@ class PigFriendsConfig(PluginConfigBase):
     """群友是🐷（pig_friends 配置节）：自动贴表情的开关、名单与概率。"""
 
     __ui_label__ = "群友是🐷"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Pig Friends", "description": "Auto-reaction switch, lists and probability."}
+    }
     __ui_icon__ = "pets"
     __ui_order__ = 3
 
@@ -141,6 +166,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用自动贴表情",
             "hint": "自动贴表情总开关",
+            **_ui_i18n("Enable auto reaction", "Master switch for auto reaction"),
         },
     )
     group_list_mode: str = Field(
@@ -149,6 +175,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "群名单模式",
             "hint": "群名单模式",
+            **_ui_i18n("Group list mode", "whitelist or blacklist"),
         },
     )
     group_list: list[str] = Field(
@@ -157,6 +184,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "群名单",
             "hint": "群号名单，留空全群",
+            **_ui_i18n("Group list", "Group IDs; empty means all groups"),
         },
     )
     user_list_mode: str = Field(
@@ -165,6 +193,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "用户名单模式",
             "hint": "用户名单模式",
+            **_ui_i18n("User list mode", "whitelist or blacklist"),
         },
     )
     user_list: list[str] = Field(
@@ -173,6 +202,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "用户名单",
             "hint": "QQ 号名单",
+            **_ui_i18n("User list", "QQ IDs"),
         },
     )
     normal_probability: float = Field(
@@ -181,6 +211,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "普通用户触发概率",
             "hint": "普通用户贴表情概率",
+            **_ui_i18n("Normal user probability", "Chance per message for normal users"),
         },
     )
     normal_cooldown_seconds: int = Field(
@@ -189,6 +220,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "普通用户冷却（秒）",
             "hint": "普通用户冷却时长",
+            **_ui_i18n("Normal user cooldown (seconds)", "0 disables cooldown"),
         },
     )
     pig_users: list[str] = Field(
@@ -197,6 +229,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "🐷用户名单",
             "hint": "🐷用户不受名单限制",
+            **_ui_i18n("Pig user list", "Pig users bypass list checks"),
         },
     )
     pig_cooldown_seconds: int = Field(
@@ -205,6 +238,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "🐷用户冷却（秒）",
             "hint": "🐷用户独立冷却时长",
+            **_ui_i18n("Pig user cooldown (seconds)", "Independent per QQ; 0 disables"),
         },
     )
     pig_chain_skip_cooldown_probability: float = Field(
@@ -213,6 +247,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "免冷却连贴概率",
             "hint": "免冷却连贴概率",
+            **_ui_i18n("No-cooldown chain probability", "Chance to skip cooldown after reacting"),
         },
     )
     pig_max_chain: int = Field(
@@ -221,6 +256,7 @@ class PigFriendsConfig(PluginConfigBase):
         json_schema_extra={
             "label": "最大连贴条数",
             "hint": "一轮最多连贴条数",
+            **_ui_i18n("Max chain count", "Max distinct messages per chain"),
         },
     )
 
@@ -229,6 +265,9 @@ class PluginSectionConfig(PluginConfigBase):
     """插件（plugin 配置节）：插件级开关与配置版本。"""
 
     __ui_label__ = "插件"
+    __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "en": {"title": "Plugin", "description": "Plugin-level switch and config version."}
+    }
     __ui_icon__ = "package"
     __ui_order__ = 0
 
@@ -238,6 +277,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用插件",
             "hint": "插件总开关",
+            **_ui_i18n("Enable plugin", "Master switch for the plugin."),
         },
     )
     config_version: str = Field(
@@ -248,6 +288,7 @@ class PluginSectionConfig(PluginConfigBase):
             "hidden": True,
             "label": "配置版本",
             "hint": "配置版本，勿改",
+            **_ui_i18n("Config version", "Config version, do not edit."),
         },
     )
 
