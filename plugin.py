@@ -35,9 +35,12 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.3.1"
+SUPPORTED_CONFIG_VERSION = "0.3.2"
 
-# 默认贴表情 ID（描述库为空时的兜底）：对应 QQ 表情「点赞」
+# 默认贴表情 ID 的硬兜底（配置项缺失或值非法时回退到这里）：
+# 对应 QQ 表情「祝(猪)」（emoji_reaction_extra.json 实测可贴的扩展 ID）。
+# 正常情况下默认值由配置项提供：emoji_reaction.default_emoji_id（工具默认/兜底）、
+# pig_friends.auto_emoji_id（「群友是🐷」自动贴表情），二者默认均为 12951。
 DEFAULT_EMOJI_ID = 12951
 
 # emoji_id 合法范围上限：QQ 表情 ID 为非负 int32（越界 ID 不透传给协议端）
@@ -115,13 +118,27 @@ class EmojiReactionConfig(PluginConfigBase):
         },
     )
 
+    default_emoji_id: int = Field(
+        default=DEFAULT_EMOJI_ID,
+        description=(
+            "默认/兜底表情 ID（默认 12951，祝(猪)）：emoji_like 工具不传 emoji 参数时使用它；"
+            "开启「未识别表达回退」时，无法识别的表情表达也自动回退到它。"
+            "需为 0 ~ 2147483647 的整数，非法/越界值回退默认 12951"
+        ),
+        json_schema_extra={
+            "label": "默认/兜底表情 ID",
+            "hint": "工具默认与未识别回退的表情",
+            **_ui_i18n("Default/fallback emoji ID", "Used when emoji param is empty or unrecognized"),
+        },
+    )
+
     allow_fallback_to_default: bool = Field(
         default=True,
-        description="未识别的表情表达回退到默认表情（12951，点赞/猪猪）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
+        description="未识别的表情表达回退到默认表情（见「默认/兜底表情 ID」）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
         json_schema_extra={
             "label": "未识别表达回退默认表情",
             "hint": "未识别回退默认表情",
-            **_ui_i18n("Fallback to default emoji", "Use default emoji (12951) when unrecognized"),
+            **_ui_i18n("Fallback to default emoji", "Use default emoji when unrecognized"),
         },
     )
 
@@ -169,6 +186,18 @@ class PigFriendsConfig(PluginConfigBase):
             **_ui_i18n("Enable auto reaction", "Master switch for auto reaction"),
         },
     )
+    auto_emoji_id: int = Field(
+        default=DEFAULT_EMOJI_ID,
+        description=(
+            "自动贴的表情 ID（默认 12951，祝(猪)）：普通用户概率命中与🐷用户冷却触发时，"
+            "都对目标消息贴这个表情。需为 0 ~ 2147483647 的整数，非法/越界值回退默认 12951"
+        ),
+        json_schema_extra={
+            "label": "自动贴表情 ID",
+            "hint": "自动贴表情使用的表情 ID",
+            **_ui_i18n("Auto reaction emoji ID", "Emoji ID used for auto reactions"),
+        },
+    )
     group_list_mode: str = Field(
         default="whitelist",
         description="群名单模式：whitelist=仅以下群生效；blacklist=以下群不生效",
@@ -207,7 +236,7 @@ class PigFriendsConfig(PluginConfigBase):
     )
     normal_probability: float = Field(
         default=0.05,
-        description="普通用户每次发消息贴 12951 表情的概率（0~1，默认 0.05）",
+        description="普通用户每次发消息自动贴表情（ID 见「自动贴表情 ID」）的概率（0~1，默认 0.05）",
         json_schema_extra={
             "label": "普通用户触发概率",
             "hint": "普通用户贴表情概率",
@@ -225,7 +254,7 @@ class PigFriendsConfig(PluginConfigBase):
     )
     pig_users: list[str] = Field(
         default_factory=list,
-        description="你是那么大个🐷：这些 QQ 号不看黑白名单，每次发消息且冷却过即贴 12951",
+        description="你是那么大个🐷：这些 QQ 号不看黑白名单，每次发消息且冷却过即贴表情（ID 见「自动贴表情 ID」）",
         json_schema_extra={
             "label": "🐷用户名单",
             "hint": "🐷用户不受名单限制",
@@ -356,16 +385,18 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         """查询可用的贴表情列表（供 LLM 在调用 emoji_like 前确认表情与 ID）。"""
         del kwargs
         library = self._get_description_library()
+        default_id = self._get_default_emoji_id()
+        default_name = self._notice_parser.emoji_resolver.resolve(str(default_id))
         if not library:
             return {
                 "success": True,
                 "emoji_list": [],
                 "content": (
-                    "当前没有配置任何表情，贴表情将使用默认表情 12951（祝(猪)）。"
+                    f"当前没有配置任何表情，贴表情将使用默认表情 {default_id}（{default_name}）。"
                     "直接调用 emoji_like 且不传 emoji 参数即可。"
                 ),
-                "message": "当前没有配置任何表情，将使用默认表情 12951",
-                "default_emoji_id": str(DEFAULT_EMOJI_ID),
+                "message": f"当前没有配置任何表情，将使用默认表情 {default_id}",
+                "default_emoji_id": str(default_id),
             }
         emoji_list = [
             {
@@ -385,6 +416,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 f"- emoji_id={item['emoji_id']}，{item['emoji_name']}：{item['description']}"
             )
         lines.append(
+            f"默认表情：emoji_id={default_id}（{default_name}），"
             "选择要用的表情后，把对应 emoji_id（数字）传给 emoji_like 工具；"
             "也可以不传 emoji 参数使用默认表情。"
         )
@@ -394,7 +426,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             "emoji_list": emoji_list,
             "content": content,
             "message": content,
-            "default_emoji_id": str(DEFAULT_EMOJI_ID),
+            "default_emoji_id": str(default_id),
         }
 
     @Tool(
@@ -405,7 +437,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             "或想与群友互动时，可以对目标消息贴一个表情回应，比发送表情包更轻量自然。"
             "默认贴到最近一条非机器人消息（通常是你正在回复/讨论的那条）。"
             "调用前请先调用 emoji_like_list 确认可用的表情及其 ID，再把对应的 ID 传入 emoji 参数，"
-            "不要凭印象编造表情表达或 ID。若你传入的描述无法识别，插件会自动回退到默认表情（12951）。"
+            "不要凭印象编造表情表达或 ID。若你传入的描述无法识别，插件会自动回退到默认表情"
+            "（具体 ID 见 emoji_like_list 返回的 default_emoji_id）。"
             "调用后请在你的回复中自然提及这次贴表情，避免重复表达。"
         ),
         parameters=[
@@ -415,7 +448,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 description=(
                     "要贴的表情 ID（数字，如 14、66、12951）。"
                     "先调用 emoji_like_list 查看可用表情及其 emoji_id，把对应的数字 ID 传到这里；"
-                    "也可以是描述库中的表达（如「猪猪表情」）。留空时使用默认表情（12951，祝(猪)）。"
+                    "也可以是描述库中的表达（如「猪猪表情」）。"
+                    "留空时使用默认表情（ID 见 emoji_like_list 返回的 default_emoji_id）。"
                 ),
                 required=False,
             ),
@@ -456,7 +490,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                 f"未识别的表情表达：{emoji_raw!r}。"
                 "请先调用 emoji_like_list 查看可用表情及其 ID，"
                 "把对应的 emoji_id（数字）传给本工具的 emoji 参数；"
-                "或留空 emoji 参数使用默认表情（12951）。不要反复尝试未列出的表达。"
+                f"或留空 emoji 参数使用默认表情（{self._get_default_emoji_id()}）。"
+                "不要反复尝试未列出的表达。"
             )
             return {"success": False, "error": error_text, "content": error_text}
 
@@ -536,6 +571,35 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             return emoji_id
         return None
 
+    def _validated_config_emoji_id(self, raw_value: Any, config_name: str) -> int:
+        """校验配置的表情 ID（非负 int32）；非法/越界回退硬兜底 DEFAULT_EMOJI_ID 并告警。"""
+        emoji_id = self._safe_emoji_id(raw_value)
+        if emoji_id is None:
+            self.ctx.logger.warning(
+                "配置 %s=%r 无效（需为 0 ~ %d 的整数），回退默认表情 %d",
+                config_name, raw_value, MAX_EMOJI_ID, DEFAULT_EMOJI_ID,
+            )
+            return DEFAULT_EMOJI_ID
+        return emoji_id
+
+    def _get_default_emoji_id(self) -> int:
+        """emoji_like 工具的默认/兜底表情 ID（配置 emoji_reaction.default_emoji_id）。"""
+        try:
+            return self._validated_config_emoji_id(
+                self.config.emoji_reaction.default_emoji_id, "emoji_reaction.default_emoji_id"
+            )
+        except Exception:
+            return DEFAULT_EMOJI_ID
+
+    def _get_pig_auto_emoji_id(self) -> int:
+        """「群友是🐷」自动贴表情 ID（配置 pig_friends.auto_emoji_id）。"""
+        try:
+            return self._validated_config_emoji_id(
+                self.config.pig_friends.auto_emoji_id, "pig_friends.auto_emoji_id"
+            )
+        except Exception:
+            return DEFAULT_EMOJI_ID
+
     def _resolve_emoji_id(self, emoji_raw: str) -> tuple[Optional[int], bool]:
         """解析表情：表情名反查 → 描述库文本匹配 → 数字直接转 int → 失败回退默认表情。
 
@@ -545,9 +609,10 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             （描述库外的情绪词、无效文本等）都会回退到默认表情，不再返回 None。
         """
         emoji_raw = str(emoji_raw or "").strip()
+        default_id = self._get_default_emoji_id()
         if not emoji_raw:
             # 空 → 默认表情（不算回退，是正常默认）
-            return DEFAULT_EMOJI_ID, False
+            return default_id, False
         library = self._get_description_library()
 
         # 1. 表情名反查（映射表：名称 → ID）。LLM 可能直接传表情名（如「可爱」「吃瓜」），
@@ -579,9 +644,9 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         # 4. 无法识别 → 是否回退默认表情（防止 LLM 传情绪词「开心」「俏皮」等导致失败）
         if self.config.emoji_reaction.allow_fallback_to_default:
             self.ctx.logger.info(
-                "表情表达「%s」未命中描述库，回退到默认表情 %d", emoji_raw, DEFAULT_EMOJI_ID
+                "表情表达「%s」未命中描述库，回退到默认表情 %d", emoji_raw, default_id
             )
-            return DEFAULT_EMOJI_ID, True
+            return default_id, True
         return None, False
 
     async def _find_recent_user_message(self, stream_id: str) -> str:
@@ -788,7 +853,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
     @HookHandler(
         "chat.receive.before_process",
         name="pig_friends_listener",
-        description="用户发消息时按概率/规则自动贴 12951 表情（群友是🐷）",
+        description="用户发消息时按概率/规则自动贴表情（群友是🐷，表情 ID 见 pig_friends.auto_emoji_id）",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         error_policy=ErrorPolicy.SKIP,
@@ -889,7 +954,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         # 全局冷却判定 + 占坑（所有普通用户共享，原子）
         if not self._pig_state.normal_try_take(now, cooldown):
             return
-        await self._do_pig_stick(stream_id, target_message_id, cfg, user_id)
+        await self._do_pig_stick(stream_id, target_message_id, user_id)
 
     async def _pig_react(
         self, user_id: str, target_message_id: str, stream_id: str, cfg: Any, now: float,
@@ -915,7 +980,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             return
 
         # 贴当前消息
-        await self._do_pig_stick(stream_id, target_message_id, cfg, user_id)
+        await self._do_pig_stick(stream_id, target_message_id, user_id)
 
         # 判定是否进入免冷却连贴链
         chain_count = self._pig_state.pig_chain_count(user_id)
@@ -935,14 +1000,14 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             # 0.25 未命中：退出链，恢复正常冷却
             self._pig_state.pig_chain_reset(user_id, now, cooldown)
 
-    async def _do_pig_stick(self, stream_id: str, target_message_id: str, cfg: Any, user_id: str) -> None:
-        """贴 12951 表情（标准流程：贴表情 + 记录 + 上下文）。"""
-        emoji_id = 12951
+    async def _do_pig_stick(self, stream_id: str, target_message_id: str, user_id: str) -> None:
+        """贴自动表情（pig_friends.auto_emoji_id；标准流程：贴表情 + 记录 + 上下文）。"""
+        emoji_id = self._get_pig_auto_emoji_id()
         ok, err = await self._apply_emoji_like(stream_id, target_message_id, emoji_id)
         if not ok:
             self.ctx.logger.warning("群友是🐷贴表情失败（user=%s msg=%s）：%s", user_id, target_message_id, err)
             return
-        self.ctx.logger.info("群友是🐷：对用户 %s 的消息 %s 贴了 12951", user_id, target_message_id)
+        self.ctx.logger.info("群友是🐷：对用户 %s 的消息 %s 贴了 %d", user_id, target_message_id, emoji_id)
         # 概率自动触发（非 bot 调用工具）：记录带「插件概率事件」标签，
         # 提示 LLM 用户未直接提及该行为则忽视，提及则回应为随手贴的
         await self._record_and_context(

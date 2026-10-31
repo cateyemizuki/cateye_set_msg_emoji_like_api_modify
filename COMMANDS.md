@@ -27,5 +27,5 @@
 
 无需指令，开启 `[pig_friends] enabled = true` 后自动生效：
 
-- **普通用户**：发消息 → 按 `normal_probability` 概率命中 → 贴 12951 → 全局冷却 `normal_cooldown_seconds`；
+- **普通用户**：发消息 → 按 `normal_probability` 概率命中 → 贴自动表情（`auto_emoji_id`，默认 12951）→ 全局冷却 `normal_cooldown_seconds`；
 - **猪友（`pig_users`）**：发消息 → 冷却过即贴（独立冷却、不看概率与黑白名单）→ 贴后按 `pig_chain_skip_cooldown_probability` 概率免冷却连贴下一条消息，最多 `pig_max_chain` 条。

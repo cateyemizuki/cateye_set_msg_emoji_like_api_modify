@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "github.cateye.set-msg-emoji-like",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "name": "表情回应",
-  "description": "对聊天消息贴 QQ 表情回应（reaction）：注册 LLM 工具让模型自然决定贴表情表达情绪或与群友交互（可替代 send_emoji）；同时把收到的表情回应通知翻译为可读文本注入框架。依赖官方合并版 SnowLuma 适配器（maibot-team.snowluma-adapter 1.0+，已内置 NapCat 完整 API 面）提供 adapter.napcat.action.call 通用入口；未安装时插件不会加载（Host 依赖流水线阻止，并保证适配器先于本插件启动）。",
+  "description": "对聊天消息贴 QQ 表情回应（reaction）：注册 LLM 工具让模型自然决定贴表情表达情绪或与群友交互（可替代 send_emoji），默认/兜底表情与「群友是🐷」自动贴表情的 ID 均可配置；同时把收到的表情回应通知翻译为可读文本注入框架。依赖官方合并版 SnowLuma 适配器（maibot-team.snowluma-adapter 1.0+，已内置 NapCat 完整 API 面）提供 adapter.napcat.action.call 通用入口；未安装时插件不会加载（Host 依赖流水线阻止，并保证适配器先于本插件启动）。",
   "author": {
     "name": "cateye",
     "url": "https://github.com/cateyemizuki"
@@ -45,7 +45,8 @@
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [
-      "zh-CN"
+      "zh-CN",
+      "en"
     ]
   }
 }
