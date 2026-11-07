@@ -50,7 +50,7 @@
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
 3. **安装并启用官方合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter` 1.0+，已内置 NapCat 完整 API 面，宿主区间 1.2.0 ~ 1.3.99），并确保其已连接到协议端。本插件 0.3.0 起声明该插件级依赖：适配器缺失时插件不会加载；仅装旧版 NapCat 适配器的 1.2.x 环境请使用本插件 0.2.3。
 
-> 兼容性声明：`host_application` `1.0.0 ~ 1.99.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
+> 兼容性声明：`host_application` `1.2.0 ~ 1.3.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
 
 ## 配置说明
 
