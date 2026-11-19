@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import time
@@ -35,7 +36,7 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.3.2"
+SUPPORTED_CONFIG_VERSION = "0.3.3"
 
 # 默认贴表情 ID 的硬兜底（配置项缺失或值非法时回退到这里）：
 # 对应 QQ 表情「祝(猪)」（emoji_reaction_extra.json 实测可贴的扩展 ID）。
@@ -58,18 +59,19 @@ EVENT_TAG_PROBABILISTIC = "[事件-插件概率事件（聊天中用户未直接
 # 合并版适配器（1.0+）的专用 set_msg_emoji_like API 已原生接受负 ID，但 action.call
 # 仍是新旧适配器（1.2.x 旧版 NapCat 适配器的专用 API 校验正整数）共用的稳妥通道。
 NAPCAT_ACTION_CALL_API = "adapter.napcat.action.call"
+REACTION_NOTICE_GATEWAY = "emoji_reaction_reporter"
 
 
-def _ui_i18n(en_label: str, en_hint: str = "") -> Dict[str, Dict[str, Dict[str, str]]]:
-    """字段级英文翻译（并入 json_schema_extra；WebUI 按 i18n[locale]['label'/'hint'] 取用）。
-
-    zh-CN 文案即字段本身的 label/hint（中文），无需重复；此处仅补充 en，
-    满足 WebUI 元数据要求（每个字段至少提供 en 的 label/hint）。
-    """
-    entry: Dict[str, str] = {"label": en_label}
-    if en_hint:
-        entry["hint"] = en_hint
-    return {"i18n": {"en": entry}}
+def _ui_field(label: str, hint: str, en_label: str, en_hint: str) -> Dict[str, Any]:
+    """生成字段标签、提示及显式的中英文翻译。"""
+    return {
+        "label": label,
+        "hint": hint,
+        "i18n": {
+            "zh-CN": {"label": label, "hint": hint},
+            "en": {"label": en_label, "hint": en_hint},
+        },
+    }
 
 
 # ==================== 配置模型 ====================
@@ -80,6 +82,7 @@ class EmojiLikeConfig(PluginConfigBase):
 
     __ui_label__ = "表情"
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "zh-CN": {"title": "表情", "description": "表情展示与未知表情显示方式。"},
         "en": {"title": "Emoji Display", "description": "Emoji display and unknown-emoji rendering."}
     }
     __ui_icon__ = "sentiment_satisfied"
@@ -88,11 +91,10 @@ class EmojiLikeConfig(PluginConfigBase):
     optimize_unknown_emoji: bool = Field(
         default=False,
         description="优化未知表情信息：开启后未知表情显示为「一个表情」（如「表达了 一个表情」）；关闭时显示「未知表情<id>」（与 snowluma 一致，默认关闭）",
-        json_schema_extra={
-            "label": "优化未知表情显示",
-            "hint": "未知表情显示优化",
-            **_ui_i18n("Optimize unknown emoji display", "Show unknown emoji as 'an emoji'"),
-        },
+        json_schema_extra=_ui_field(
+            "优化未知表情显示", "未知表情显示优化",
+            "Optimize unknown emoji display", "Show unknown emoji as 'an emoji'",
+        ),
     )
 
 
@@ -101,7 +103,8 @@ class EmojiReactionConfig(PluginConfigBase):
 
     __ui_label__ = "贴表情工具"
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
-        "en": {"title": "Emoji Reaction Tool", "description": "Description library and fallback behavior."}
+        "zh-CN": {"title": "贴表情工具", "description": "表情描述库、工具默认行为与通知补录。"},
+        "en": {"title": "Emoji Reaction Tool", "description": "Description library, tool defaults and reaction notices."}
     }
     __ui_icon__ = "swap_horiz"
     __ui_order__ = 2
@@ -111,11 +114,10 @@ class EmojiReactionConfig(PluginConfigBase):
             f"{emoji_id}: {desc}" for emoji_id, desc in DEFAULT_DESCRIPTION_LIBRARY.items()
         ],
         description="描述库（每行一条）：`emoji_id: 描述`。如 `12951: 该回应表情等效网络流行的猪猪表情包，表达群友可爱又有点笨的样子`",
-        json_schema_extra={
-            "label": "描述库",
-            "hint": "表情描述库，一行一条",
-            **_ui_i18n("Description library", "One 'emoji_id: description' entry per line"),
-        },
+        json_schema_extra=_ui_field(
+            "描述库", "表情描述库，一行一条",
+            "Description library", "One 'emoji_id: description' entry per line",
+        ),
     )
 
     default_emoji_id: int = Field(
@@ -125,31 +127,42 @@ class EmojiReactionConfig(PluginConfigBase):
             "开启「未识别表达回退」时，无法识别的表情表达也自动回退到它。"
             "需为 0 ~ 2147483647 的整数，非法/越界值回退默认 12951"
         ),
-        json_schema_extra={
-            "label": "默认/兜底表情 ID",
-            "hint": "工具默认与未识别回退的表情",
-            **_ui_i18n("Default/fallback emoji ID", "Used when emoji param is empty or unrecognized"),
-        },
+        json_schema_extra=_ui_field(
+            "默认/兜底表情 ID", "工具默认与未识别回退的表情",
+            "Default/fallback emoji ID", "Used when emoji param is empty or unrecognized",
+        ),
     )
 
     allow_fallback_to_default: bool = Field(
         default=True,
         description="未识别的表情表达回退到默认表情（见「默认/兜底表情 ID」）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
-        json_schema_extra={
-            "label": "未识别表达回退默认表情",
-            "hint": "未识别回退默认表情",
-            **_ui_i18n("Fallback to default emoji", "Use default emoji when unrecognized"),
-        },
+        json_schema_extra=_ui_field(
+            "未识别表达回退默认表情", "未识别回退默认表情",
+            "Fallback to default emoji", "Use default emoji when unrecognized",
+        ),
     )
 
     tool_cooldown_seconds: float = Field(
         default=10.0,
         description="emoji_like 工具每个会话的最小调用间隔秒数（防刷屏频控，默认 10 秒；0 = 不限频）",
-        json_schema_extra={
-            "label": "贴表情工具冷却（秒）",
-            "hint": "每会话最小调用间隔",
-            **_ui_i18n("Tool cooldown (seconds)", "Min per-stream call interval"),
-        },
+        json_schema_extra=_ui_field(
+            "贴表情工具冷却（秒）", "每会话最小调用间隔",
+            "Tool cooldown (seconds)", "Min per-stream call interval",
+        ),
+    )
+
+    record_reaction_notice: bool = Field(
+        default=True,
+        description=(
+            "把机器人贴表情的动作补录到 WebUI 聊天记录。关闭后注销补录网关，实际贴表情、"
+            "群友表情通知翻译和 Planner 上下文仍可使用。"
+        ),
+        json_schema_extra=_ui_field(
+            "补录表情通知",
+            "关闭后注销 QQ 补录网关",
+            "Record reaction notices",
+            "Turn off to unregister the QQ recording gateway",
+        ),
     )
 
     @field_validator("description_library", mode="before")
@@ -172,6 +185,7 @@ class PigFriendsConfig(PluginConfigBase):
 
     __ui_label__ = "群友是🐷"
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "zh-CN": {"title": "群友是🐷", "description": "自动贴表情开关、名单与概率。"},
         "en": {"title": "Pig Friends", "description": "Auto-reaction switch, lists and probability."}
     }
     __ui_icon__ = "pets"
@@ -180,11 +194,10 @@ class PigFriendsConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description="总开关：启用「群友是🐷」自动贴表情功能",
-        json_schema_extra={
-            "label": "启用自动贴表情",
-            "hint": "自动贴表情总开关",
-            **_ui_i18n("Enable auto reaction", "Master switch for auto reaction"),
-        },
+        json_schema_extra=_ui_field(
+            "启用自动贴表情", "自动贴表情总开关",
+            "Enable auto reaction", "Master switch for auto reaction",
+        ),
     )
     auto_emoji_id: int = Field(
         default=DEFAULT_EMOJI_ID,
@@ -192,101 +205,72 @@ class PigFriendsConfig(PluginConfigBase):
             "自动贴的表情 ID（默认 12951，祝(猪)）：普通用户概率命中与🐷用户冷却触发时，"
             "都对目标消息贴这个表情。需为 0 ~ 2147483647 的整数，非法/越界值回退默认 12951"
         ),
-        json_schema_extra={
-            "label": "自动贴表情 ID",
-            "hint": "自动贴表情使用的表情 ID",
-            **_ui_i18n("Auto reaction emoji ID", "Emoji ID used for auto reactions"),
-        },
+        json_schema_extra=_ui_field(
+            "自动贴表情 ID", "自动贴表情使用的表情 ID",
+            "Auto reaction emoji ID", "Emoji ID used for auto reactions",
+        ),
     )
     group_list_mode: str = Field(
         default="whitelist",
         description="群名单模式：whitelist=仅以下群生效；blacklist=以下群不生效",
-        json_schema_extra={
-            "label": "群名单模式",
-            "hint": "群名单模式",
-            **_ui_i18n("Group list mode", "whitelist or blacklist"),
-        },
+        json_schema_extra=_ui_field("群名单模式", "群名单模式", "Group list mode", "whitelist or blacklist"),
     )
     group_list: list[str] = Field(
         default_factory=list,
         description="群名单（填群号；按 group_list_mode 决定白/黑名单）",
-        json_schema_extra={
-            "label": "群名单",
-            "hint": "群号名单，留空全群",
-            **_ui_i18n("Group list", "Group IDs; empty means all groups"),
-        },
+        json_schema_extra=_ui_field("群名单", "群号名单，留空全群", "Group list", "Group IDs; empty means all groups"),
     )
     user_list_mode: str = Field(
         default="blacklist",
         description="用户名单模式：whitelist=仅以下用户生效；blacklist=以下用户不生效",
-        json_schema_extra={
-            "label": "用户名单模式",
-            "hint": "用户名单模式",
-            **_ui_i18n("User list mode", "whitelist or blacklist"),
-        },
+        json_schema_extra=_ui_field("用户名单模式", "用户名单模式", "User list mode", "whitelist or blacklist"),
     )
     user_list: list[str] = Field(
         default_factory=list,
         description="用户名单（填 QQ 号；按 user_list_mode 决定白/黑名单）",
-        json_schema_extra={
-            "label": "用户名单",
-            "hint": "QQ 号名单",
-            **_ui_i18n("User list", "QQ IDs"),
-        },
+        json_schema_extra=_ui_field("用户名单", "QQ 号名单", "User list", "QQ IDs"),
     )
     normal_probability: float = Field(
         default=0.05,
         description="普通用户每次发消息自动贴表情（ID 见「自动贴表情 ID」）的概率（0~1，默认 0.05）",
-        json_schema_extra={
-            "label": "普通用户触发概率",
-            "hint": "普通用户贴表情概率",
-            **_ui_i18n("Normal user probability", "Chance per message for normal users"),
-        },
+        json_schema_extra=_ui_field(
+            "普通用户触发概率", "普通用户贴表情概率",
+            "Normal user probability", "Chance per message for normal users",
+        ),
     )
     normal_cooldown_seconds: int = Field(
         default=600,
         description="普通用户贴表情后的冷却秒数（默认 600 秒；0 = 禁用冷却）",
-        json_schema_extra={
-            "label": "普通用户冷却（秒）",
-            "hint": "普通用户冷却时长",
-            **_ui_i18n("Normal user cooldown (seconds)", "0 disables cooldown"),
-        },
+        json_schema_extra=_ui_field(
+            "普通用户冷却（秒）", "普通用户冷却时长",
+            "Normal user cooldown (seconds)", "0 disables cooldown",
+        ),
     )
     pig_users: list[str] = Field(
         default_factory=list,
         description="你是那么大个🐷：这些 QQ 号不看黑白名单，每次发消息且冷却过即贴表情（ID 见「自动贴表情 ID」）",
-        json_schema_extra={
-            "label": "🐷用户名单",
-            "hint": "🐷用户不受名单限制",
-            **_ui_i18n("Pig user list", "Pig users bypass list checks"),
-        },
+        json_schema_extra=_ui_field("🐷用户名单", "🐷用户不受名单限制", "Pig user list", "Pig users bypass list checks"),
     )
     pig_cooldown_seconds: int = Field(
         default=1800,
         description="🐷用户冷却秒数（默认 1800 = 30 分钟，每个 QQ 独立；0 = 禁用冷却）",
-        json_schema_extra={
-            "label": "🐷用户冷却（秒）",
-            "hint": "🐷用户独立冷却时长",
-            **_ui_i18n("Pig user cooldown (seconds)", "Independent per QQ; 0 disables"),
-        },
+        json_schema_extra=_ui_field(
+            "🐷用户冷却（秒）", "🐷用户独立冷却时长",
+            "Pig user cooldown (seconds)", "Independent per QQ; 0 disables",
+        ),
     )
     pig_chain_skip_cooldown_probability: float = Field(
         default=0.25,
         description="🐷用户每次贴后不进冷却的概率（默认 0.25；命中则下一条消息直接贴）",
-        json_schema_extra={
-            "label": "免冷却连贴概率",
-            "hint": "免冷却连贴概率",
-            **_ui_i18n("No-cooldown chain probability", "Chance to skip cooldown after reacting"),
-        },
+        json_schema_extra=_ui_field(
+            "免冷却连贴概率", "免冷却连贴概率",
+            "No-cooldown chain probability", "Chance to skip cooldown after reacting",
+        ),
     )
     pig_max_chain: int = Field(
         default=3,
         description="🐷用户最多连贴的不同消息数（默认 3，第 3 个贴完停止本轮连贴）",
-        json_schema_extra={
-            "label": "最大连贴条数",
-            "hint": "一轮最多连贴条数",
-            **_ui_i18n("Max chain count", "Max distinct messages per chain"),
-        },
+        json_schema_extra=_ui_field("最大连贴条数", "一轮最多连贴条数", "Max chain count", "Max distinct messages per chain"),
     )
 
 
@@ -295,6 +279,7 @@ class PluginSectionConfig(PluginConfigBase):
 
     __ui_label__ = "插件"
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
+        "zh-CN": {"title": "插件", "description": "插件总开关与配置版本。"},
         "en": {"title": "Plugin", "description": "Plugin-level switch and config version."}
     }
     __ui_icon__ = "package"
@@ -303,11 +288,7 @@ class PluginSectionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=True,
         description="是否启用插件",
-        json_schema_extra={
-            "label": "启用插件",
-            "hint": "插件总开关",
-            **_ui_i18n("Enable plugin", "Master switch for the plugin."),
-        },
+        json_schema_extra=_ui_field("启用插件", "插件总开关", "Enable plugin", "Master switch for the plugin."),
     )
     config_version: str = Field(
         default=SUPPORTED_CONFIG_VERSION,
@@ -315,9 +296,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={
             "disabled": True,
             "hidden": True,
-            "label": "配置版本",
-            "hint": "配置版本，勿改",
-            **_ui_i18n("Config version", "Config version, do not edit."),
+            **_ui_field("配置版本", "配置版本，勿改", "Config version", "Config version, do not edit."),
         },
     )
 
@@ -351,11 +330,16 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         self._pig_state_last_cleanup = 0.0  # 上次冷却状态清理时间（每小时低频清理一次）
         self._bot_nickname_cache: Dict[str, Any] = {"value": "", "expires": 0.0}  # 机器人昵称缓存
 
+        self._notice_gateway_lock = asyncio.Lock()
+        self._notice_gateway_route: tuple[str, str] | None = None
+        self._notice_gateway_state_unknown = False
+        self._loaded = False
+
     # ==================== MessageGateway：注入合成通知 ====================
 
     @MessageGateway(
         "receive",
-        name="emoji_reaction_reporter",
+        name=REACTION_NOTICE_GATEWAY,
         description="注入贴表情合成通知消息（走完整入站链，入库显示在 WebUI）",
         platform="qq",
     )
@@ -743,21 +727,52 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         # 期望结构：`{event_tag} {bot名} 对消息(ID:X)贴了表情：{描述}`
         bot_name = str(stream_info.get("bot_nickname") or stream_info.get("self_id") or "").strip() or "机器人"
         record_text = f"{event_tag} {bot_name} 对消息(ID:{message_id})贴了表情：{desc}"
-        if not str(stream_info.get("self_id") or "").strip():
-            self.ctx.logger.warning(
-                "贴表情记录身份信息缺失（self_id 为空），放弃注入聊天流（stream=%s）", stream_id
+        if self.config.emoji_reaction.record_reaction_notice:
+            await self._record_reaction_notice(stream_id, message_id, emoji_id, stream_info, record_text)
+
+        # 注入 Planner 上下文（保证 LLM 后续回复知道贴了表情）
+        try:
+            await self.ctx.maisaka.context.append(
+                stream_id,
+                [{"type": "text", "content": record_text}],
+                visible_text=record_text,
+                source_kind="emoji_like_tool",
             )
-        else:
+        except Exception as exc:
+            self.ctx.logger.warning("追加贴表情上下文失败（stream=%s）：%s", stream_id, exc)
+
+    async def _record_reaction_notice(
+        self, stream_id: str, message_id: str, emoji_id: int, stream_info: Dict[str, Any], record_text: str
+    ) -> None:
+        async with self._notice_gateway_lock:
+            if not (self._loaded and self.config.emoji_reaction.record_reaction_notice):
+                return
+            # 私聊以入站作者决定会话，机器人作为作者的通知只适合注入原群聊。
+            if stream_info.get("platform") != "qq" or not stream_info.get("group_info", {}).get("group_id"):
+                return
+            account_id = str(stream_info.get("self_id") or "").strip()
+            if not account_id:
+                self.ctx.logger.warning(
+                    "贴表情记录缺少机器人账号，跳过补录（stream=%s）", stream_id
+                )
+                return
+
+            scope = str(stream_info.get("scope") or "").strip()
             try:
+                # 宿主要求消息与接收网关声明的账号和作用域一致。
+                await self._set_notice_gateway((account_id, scope))
+                if not self._loaded or not self.config.emoji_reaction.record_reaction_notice:
+                    return
                 notice_message = self._replacer.build_inject_notice_message(
                     stream_info=stream_info,
                     record_text=record_text,
                     extra_payload={"target_message_id": message_id, "emoji_id": str(emoji_id)},
                 )
+                notice_message["account_id"] = account_id
+                notice_message["scope"] = scope or None
                 accepted = await self.ctx.gateway.route_message(
-                    "emoji_reaction_reporter",
+                    REACTION_NOTICE_GATEWAY,
                     notice_message,
-                    route_metadata={"self_id": stream_info.get("self_id") or ""},
                     external_message_id=str(notice_message.get("message_id") or ""),
                     # dedupe_key 附带分钟级时间片：同一条消息第二次贴同款表情
                     # （合法重复）不会被旧键去重吞掉记录注入
@@ -772,17 +787,6 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                     self.ctx.logger.warning("贴表情记录注入被拒绝（stream=%s）", stream_id)
             except Exception as exc:
                 self.ctx.logger.warning("注入贴表情聊天记录失败（stream=%s）：%s", stream_id, exc)
-
-        # 注入 Planner 上下文（保证 LLM 后续回复知道贴了表情）
-        try:
-            await self.ctx.maisaka.context.append(
-                stream_id,
-                [{"type": "text", "content": record_text}],
-                visible_text=record_text,
-                source_kind="emoji_like_tool",
-            )
-        except Exception as exc:
-            self.ctx.logger.warning("追加贴表情上下文失败（stream=%s）：%s", stream_id, exc)
 
     async def _fetch_stream_info(self, stream_id: str) -> Dict[str, Any]:
         """获取流信息（self_id、群、昵称）。
@@ -811,10 +815,20 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
                     message_info = msg.get("message_info") if isinstance(msg.get("message_info"), Mapping) else {}
                     group_info = message_info.get("group_info") if isinstance(message_info.get("group_info"), Mapping) else {}
                     additional = message_info.get("additional_config") if isinstance(message_info.get("additional_config"), Mapping) else {}
-                    if not stream_info.get("self_id") and (additional.get("self_id") or additional.get("platform_io_account_id")):
-                        stream_info["platform"] = str(msg.get("platform") or "qq")
-                        stream_info["self_id"] = str(additional.get("self_id") or additional.get("platform_io_account_id") or "")
-                        stream_info["group_info"] = group_info
+                    account_id = str(msg.get("account_id") or "").strip()
+                    if account_id:
+                        scope = msg.get("scope")
+                    else:
+                        account_id = str(additional.get("platform_io_account_id") or additional.get("self_id") or "").strip()
+                        scope = additional.get("platform_io_scope") or additional.get("route_scope")
+                    if account_id:
+                        stream_info.update(
+                            platform=str(msg.get("platform") or "qq").strip().lower(),
+                            self_id=account_id,
+                            scope=str(scope or "").strip(),
+                            group_info=group_info,
+                        )
+                        break
         except Exception as exc:
             self.ctx.logger.warning("获取流信息失败（stream=%s）：%s", stream_id, exc)
         if not stream_info.get("self_id"):
@@ -1109,21 +1123,49 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
 
     # ==================== 生命周期 ====================
 
+    async def _set_notice_gateway(self, route: tuple[str, str] | None) -> None:
+        if self._notice_gateway_route == route and not self._notice_gateway_state_unknown:
+            return
+
+        # RPC 可能在宿主已应用后断开。仅用宿主确认更新本地状态。
+        self._notice_gateway_state_unknown = True
+        account_id, scope = route or ("", "")
+        accepted = await self.ctx.gateway.update_state(
+            REACTION_NOTICE_GATEWAY,
+            ready=route is not None,
+            platform="qq",
+            account_id=account_id,
+            scope=scope,
+        )
+        if not accepted:
+            raise RuntimeError("宿主未确认表情补录网关状态")
+        self._notice_gateway_route = route
+        self._notice_gateway_state_unknown = False
+
+    async def _sync_notice_gateway(self) -> None:
+        async with self._notice_gateway_lock:
+            if self._loaded and self.config.emoji_reaction.record_reaction_notice:
+                route = self._notice_gateway_route or ("", "")
+                try:
+                    await self._set_notice_gateway(route)
+                except Exception as exc:
+                    self.ctx.logger.warning("启用表情补录网关失败：%s", exc)
+            else:
+                try:
+                    await self._set_notice_gateway(None)
+                except Exception as exc:
+                    raise RuntimeError("未能注销表情补录网关") from exc
+
     async def on_load(self) -> None:
         self._check_config_version()
         self._sync_notice_config()
-        # 上报消息网关就绪（route_message 注入需要网关 ready）
-        try:
-            await self.ctx.gateway.update_state(
-                "emoji_reaction_reporter",
-                ready=True,
-                platform="qq",
-            )
-        except Exception as exc:
-            self.ctx.logger.warning("上报消息网关状态失败：%s", exc)
+        self._loaded = True
+        await self._sync_notice_gateway()
         self.ctx.logger.info("表情回应插件已加载")
 
     async def on_unload(self) -> None:
+        self._loaded = False
+        await self._sync_notice_gateway()
         self.ctx.logger.info("表情回应插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
@@ -1131,6 +1173,7 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         if scope == "self":
             self._check_config_version()
             self._sync_notice_config()
+            await self._sync_notice_gateway()
             self.ctx.logger.info("表情回应插件配置已更新")
 
 

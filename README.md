@@ -6,7 +6,7 @@
 
 机器人「迷迭香」对群友消息贴了「祝」表情回应（QQ 端显示，含贴表情记录入库）：
 
-![效果演示：迷迭香对846120357的消息贴了「祝」表情回应](assets/emoji-like-demo.jpg)
+![效果演示：迷迭香对群友消息贴了「祝」表情回应](assets/emoji-like-demo.jpg)
 
 - **LLM 工具 `emoji_like`**：让模型在聊天中自然决定对消息贴表情回应（如表达赞同、开心、无奈、可爱，或与群友互动），可作为 `send_emoji` 的轻量替代。
 - **表情回应通知翻译**：拦截 NapCat 的 `group_msg_emoji_like` 通知，翻译为「谁 对哪条消息 贴了 什么表情」，注入框架内部。
@@ -16,13 +16,13 @@
 
 - **为什么声明依赖**：① 适配器插件 ID 自合并版起变更为 `maibot-team.snowluma-adapter`，旧的 `maibot-team.napcat-adapter` 依赖在 MaiBot 1.3.0 下会因「依赖未满足」阻止本插件加载；② 按 [v1.3.0 开发文档 §4.3](https://github.com/Mai-with-u/MaiBot) 建议，调用适配器 API 的插件声明 `type: "plugin"` 依赖可获得**启动顺序保证**（适配器先于本插件启动，避免加载竞态）。
 - **适配器能力面**：合并版适配器复用 `adapter.napcat.*` 命名空间（171 个公开 API 含通用 action 入口），表情回应通知格式不变（`additional_config` 仍携带 `napcat_notice_type / napcat_notice_sub_type / napcat_notice_payload` 兼容字段）。
-- **未安装适配器时**：插件不会被加载（Host 依赖流水线报「依赖未满足」）。合并版适配器宿主区间为 `1.2.0 ~ 1.3.99`，1.2.x 环境同样可安装该适配器；仅装旧版 NapCat 适配器（`maibot-team.napcat-adapter`）的 1.2.x 环境请继续使用本插件 0.2.3。
+- **未安装适配器时**：插件不会被加载（Host 依赖流水线报「依赖未满足」）。合并版适配器 1.0.x 支持 1.2.x 宿主；仅装旧版 NapCat 适配器（`maibot-team.napcat-adapter`）的 1.2.x 环境请继续使用本插件 0.2.3。
 
 > 历史：0.2.3 及之前版本依赖 `maibot-team.napcat-adapter`；0.3.0 起正式依赖合并版 SnowLuma 适配器。
 
 目前如果使用中发现maibot没有正确收到回应信息，且观察maibot日志中出现类似
 
->08-27 20:08:32 [平台接入管理] 忽略重复入站消息: dedupe_key=gateway:maibot-team.napcat-adapter:napcat_gateway:3159826047
+>08-27 20:08:32 [平台接入管理] 忽略重复入站消息: dedupe_key=gateway:maibot-team.napcat-adapter:napcat_gateway:<去重键>
 
 这是 MaiBot 1.2.x + 旧版适配器的已知缺陷（通知去重键误用，Napcat-Adapter issue #97），**合并版适配器 1.0.x 已修复**（去重键改为事件级摘要），请升级适配器而非改内部拦截规则。
 
@@ -48,18 +48,20 @@
 
 1. 将本插件目录（含 `_manifest.json`、`plugin.py`、`notice_translator.py`、`emoji_reaction_replacer.py`、`emoji_map/` 等文件）放入 MaiBot 的 `plugins/` 目录。
 2. 重启 MaiBot，或在 WebUI 插件中心安装。
-3. **安装并启用官方合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter` 1.0+，已内置 NapCat 完整 API 面，宿主区间 1.2.0 ~ 1.3.99），并确保其已连接到协议端。本插件 0.3.0 起声明该插件级依赖：适配器缺失时插件不会加载；仅装旧版 NapCat 适配器的 1.2.x 环境请使用本插件 0.2.3。
+3. **安装并启用官方合并版 SnowLuma 适配器**（`maibot-team.snowluma-adapter` 1.0+，已内置 NapCat 完整 API 面，请选择适配器声明支持当前宿主的版本），并确保其已连接到协议端。本插件 0.3.0 起声明该插件级依赖：适配器缺失时插件不会加载；仅装旧版 NapCat 适配器的 1.2.x 环境请使用本插件 0.2.3。
 
-> 兼容性声明：`host_application` `1.2.0 ~ 1.3.99`，`sdk` `2.0.0 ~ 2.99.99`（Manifest v2）。
+> 兼容性声明：`host_application` `1.2.0 ~ 1.4.7`，`sdk` `2.7.1 ~ 2.99.99`（Manifest v2）。
 
 ## 配置说明
+
+在 WebUI 插件配置的「贴表情工具」中可切换「补录表情通知」，对应 `emoji_reaction.record_reaction_notice`，默认开启。关闭后宿主会注销对应的 QQ 补录网关。实际贴表情、群友通知翻译和 Planner 上下文照常运行。在支持配置热更新的宿主中，保存后生效。补录写入原 QQ 群的聊天记录。
 
 插件加载后由 Runner 在插件目录生成 `config.toml`，可在 WebUI 修改：
 
 ```toml
 [plugin]
 enabled = true
-config_version = "0.3.2"
+config_version = "0.3.3"
 
 [emoji]
 optimize_unknown_emoji = false   # 未知表情优化：true=显示「一个表情」；false=显示「未知表情<id>」
@@ -81,6 +83,7 @@ description_library = [
 default_emoji_id = 12951          # 默认/兜底表情 ID：emoji 参数留空与未识别回退都用它
 allow_fallback_to_default = true  # 未识别的表情表达回退到默认表情，默认开启
 tool_cooldown_seconds = 10        # emoji_like 每会话最小调用间隔（秒，0 = 不限频）
+record_reaction_notice = true    # 在 WebUI 聊天记录里补录机器人贴表情的动作
 
 [pig_friends]
 enabled = false                       # 「群友是🐷」总开关
@@ -122,8 +125,8 @@ pig_max_chain = 3                     # 猪友最多连贴条数
 
 > **机器人自己发起的表情回应不会翻译入库**：机器人贴表情后，QQ/NapCat 会回推一条"机器人贴了表情"的通知，而插件在贴表情成功时已主动注入一条记录（`[事件]...贴了表情：...`）。为避免重复入库，插件识别 `actor_user_id == self_id`（操作者是机器人自己）的通知并跳过；**群友**贴表情的通知照常翻译。
 
-- 仅对照表命中：`[事件-群消息表情回应] 846120357 对消息(ID:-7028419356)表达了 [玫瑰]`
-- 对照表 + 描述库命中：`[事件-群消息表情回应] 846120357 对消息(ID:-7028419356)表达了 玫瑰：<描述库中的具体含义>`
+- 仅对照表命中：`[事件-群消息表情回应] 群友 对消息(ID:-123456789)表达了 [玫瑰]`
+- 对照表 + 描述库命中：`[事件-群消息表情回应] 群友 对消息(ID:-123456789)表达了 玫瑰：<描述库中的具体含义>`
 - 未知表情（`optimize_unknown_emoji=false`）：`...表达了 [未知表情999999]`
 
 > 安全：昵称等用户可控文本在拼入 `processed_plain_text` / `raw_message` 前会清理控制字符（含换行/回车）、压缩空白并限长（昵称 ≤64 字符），防止恶意昵称注入提示词或撑爆上下文。
