@@ -36,7 +36,7 @@ from .notice_translator import EmojiLikeNoticeParser
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.3.3"
+SUPPORTED_CONFIG_VERSION = "0.3.4"
 
 # 默认贴表情 ID 的硬兜底（配置项缺失或值非法时回退到这里）：
 # 对应 QQ 表情「祝(猪)」（emoji_reaction_extra.json 实测可贴的扩展 ID）。
@@ -152,7 +152,7 @@ class EmojiReactionConfig(PluginConfigBase):
     )
 
     record_reaction_notice: bool = Field(
-        default=True,
+        default=False,
         description=(
             "把机器人贴表情的动作补录到 WebUI 聊天记录。关闭后注销补录网关，实际贴表情、"
             "群友表情通知翻译和 Planner 上下文仍可使用。"

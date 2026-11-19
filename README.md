@@ -54,14 +54,14 @@
 
 ## 配置说明
 
-在 WebUI 插件配置的「贴表情工具」中可切换「补录表情通知」，对应 `emoji_reaction.record_reaction_notice`，默认开启。关闭后宿主会注销对应的 QQ 补录网关。实际贴表情、群友通知翻译和 Planner 上下文照常运行。在支持配置热更新的宿主中，保存后生效。补录写入原 QQ 群的聊天记录。
+在 WebUI 插件配置的「贴表情工具」中可切换「补录表情通知」，对应 `emoji_reaction.record_reaction_notice`，默认关闭。已有配置中显式填写的值继续生效。关闭后宿主会注销对应的 QQ 补录网关。实际贴表情、群友通知翻译和 Planner 上下文照常运行。在支持配置热更新的宿主中，保存后生效。补录写入原 QQ 群的聊天记录。
 
 插件加载后由 Runner 在插件目录生成 `config.toml`，可在 WebUI 修改：
 
 ```toml
 [plugin]
 enabled = true
-config_version = "0.3.3"
+config_version = "0.3.4"
 
 [emoji]
 optimize_unknown_emoji = false   # 未知表情优化：true=显示「一个表情」；false=显示「未知表情<id>」
@@ -83,7 +83,7 @@ description_library = [
 default_emoji_id = 12951          # 默认/兜底表情 ID：emoji 参数留空与未识别回退都用它
 allow_fallback_to_default = true  # 未识别的表情表达回退到默认表情，默认开启
 tool_cooldown_seconds = 10        # emoji_like 每会话最小调用间隔（秒，0 = 不限频）
-record_reaction_notice = true    # 在 WebUI 聊天记录里补录机器人贴表情的动作
+record_reaction_notice = false   # 在 WebUI 聊天记录里补录机器人贴表情的动作
 
 [pig_friends]
 enabled = false                       # 「群友是🐷」总开关
