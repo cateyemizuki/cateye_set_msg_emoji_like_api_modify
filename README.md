@@ -1,6 +1,6 @@
 # 🐷！表情回应（MaiBot 插件）
 
-为麦麦（MaiBot）提供的表情回应插件：让机器人对聊天消息**贴 QQ 表情回应（reaction）**，把群友的表情回应通知翻译成可读文本，并把机器人发起的贴表情动作记录注入聊天流与 WebUI。
+这个 MaiBot 插件让机器人对群消息**贴 QQ 表情回应（reaction）**，并把收到的表情回应通知翻译成可读文本。
 
 当前代码版本：**0.4.1**（以 [`_manifest.json`](_manifest.json) 为准）。
 
@@ -15,7 +15,7 @@
 - **LLM 工具 `emoji_like`**：按「开心」「赞同」等情绪词查找表情，或传数字 ID 对聊天消息贴 QQ 表情回应。查询会返回 ID、名称和描述，适合先挑表情再贴。
 - **表情回应通知翻译**：拦截 NapCat 的 `group_msg_emoji_like` 通知，翻译为「谁 对哪条消息 表达了 什么表情」，改写消息文本后交给 MaiBot 后续处理。
 - **群友是🐷（默认关闭）**：用户发消息时按概率或名单规则自动贴表情，支持群/用户黑白名单、普通用户概率与全局冷却、🐷用户独立冷却与免冷却连贴链。
-- **记录注入**：贴表情动作以合成通知形式注入聊天流（WebUI 可见），同时追加到 Planner 上下文；记录文本不会作为 QQ 消息发送，但贴表情本身是真实 QQ 动作。
+- **贴表情记录**：贴表情后追加到 Planner 上下文，打开「补录表情通知」后也会显示在 WebUI 群聊记录里。
 - **消息 ID 兼容**：QQ 的 `message_id` 为带符号整数，负值合法，插件原样透传。
 
 ## 环境与依赖
@@ -41,7 +41,7 @@
 
 ## 安装
 
-1. 将本插件目录（含 `_manifest.json`、`plugin.py`、`notice_translator.py`、`emoji_reaction_replacer.py`、`emoji_map/` 等）放入 MaiBot 的 `plugins/` 目录。
+1. 下载对应版本的 `Source code (zip)`，解压后将含 `_manifest.json` 和 `plugin.py` 的整个目录放入 MaiBot 的 `plugins/`。[GitHub Releases](https://github.com/cateyemizuki/cateye_set_msg_emoji_like_api_modify/releases)
 2. 安装并启用官方合并版 SnowLuma 适配器（`maibot-team.snowluma-adapter` 1.0+），确认适配器已连接到协议端。
 3. 重启 MaiBot，或在 WebUI 插件中心安装/启用本插件。
 4. 插件加载后会在插件目录生成 `config.toml`（已被 `.gitignore` 忽略，不会进入版本库）。
@@ -70,7 +70,7 @@ optimize_unknown_emoji = false    # 未知表情显示：true=「一个表情」
 [emoji_reaction]
 search_result_limit = 5          # 查询结果上限，超出时随机抽取
 featured_emoji_mode = "使用"     # 不使用 / 使用 / 始终启用
-featured_emoji_ids = [424, 478, 479] # 续标识、对的对的、不对不对
+featured_emoji_ids = [424, 478, 479, 12951] # 续标识、对的对的、不对不对、祝(猪)
 description_library = []         # 可选的旧配置描述覆盖
 tool_cooldown_seconds = 10.0      # 每个会话的贴表情间隔（秒，0 = 不限频）
 record_reaction_notice = false   # 在 WebUI 聊天记录里补录机器人贴表情的动作

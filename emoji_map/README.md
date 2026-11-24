@@ -8,7 +8,7 @@
 | `qq_face_napcat.json` | 219 | NapCat `QQ_FACE` 快照。 |
 | `qq_face_official.json` | 73 | QQ 官方机器人文档摘录。 |
 | `qq_face_snowluma.json` | 143 | SnowLuma `QQ_FACE_DESCRIPTIONS` 快照。 |
-| `emoji_reaction_extra.json` | 5 | 扩展回应映射。包括 12951「祝(猪)」、379「点赞」和三枚默认精选表情。 |
+| `emoji_reaction_extra.json` | 5 | 扩展回应映射。包括 379「点赞」和四枚默认精选表情。 |
 | `emoji_reaction_custom.json` | 默认 0 | 用户自定义映射。 |
 
 运行时依次加载合并表、扩展表、自定义表、`extra_paths` 指定的文件、环境变量 `QQ_EMOJI_EXTRA` 指向的文件。后加载的同 ID 条目可以更新名称、描述和标签，未提供的字段沿用前一层。旧配置 `description_library` 可以继续覆盖描述。
