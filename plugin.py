@@ -2,11 +2,11 @@
 
 功能：
 1. 注册 LLM 工具「贴表情」（emoji_like）：让 LLM 自然决定对消息贴表情回应，
-   作为 send_emoji 表达情绪的替代/补充（工具描述引导）。
+   用同一个工具按关键词检索表情，或按 ID 贴到聊天消息上。
 2. 拦截 NapCat 的「表情回应」通知（group_msg_emoji_like），翻译为
    「谁 对哪条消息 贴了 什么表情」后改写消息文本，注入 MaiBot 框架内部。
 
-实现要点（详见 IMPLEMENTATION_NOTES.md）：
+实现要点：
 - 贴表情：通过 NapCat 适配器插件的通用 action 入口
   ``adapter.napcat.action.call`` 直接下发 set_msg_emoji_like 动作，
   message_id 传原始带符号值（QQ 消息 ID 为带符号 int32，负 ID 合法）；
@@ -22,30 +22,26 @@ import asyncio
 import json
 import random
 import time
-from typing import Any, ClassVar, Dict, Iterable, Mapping, Optional
+from unicodedata import normalize
+from typing import Any, ClassVar, Dict, Iterable, Literal, Mapping, Optional
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 from pydantic import field_validator
 
-from .emoji_reaction_replacer import DEFAULT_DESCRIPTION_LIBRARY, EmojiReactionReplacer, PigReactState
-from .notice_translator import EmojiLikeNoticeParser
+from .emoji_map.qq_emoji_resolver import MAX_EMOJI_ID, QQEmoji, QQEmojiResolver, parse_emoji_id
+from .emoji_reaction_replacer import EmojiReactionReplacer, PigReactState
+from .notice_translator import EmojiLikeNoticeParser, sanitize_user_text
 
 # ==================== 常量 ====================
 
 # 配置版本：与 _manifest.json 的 version 保持同步。
 # MaiBot 1.2.3+ 强制要求插件配置提供 plugin.config_version（runner_main.py
 # extract_plugin_config_version），缺失会导致插件初始化失败。
-SUPPORTED_CONFIG_VERSION = "0.3.4"
+SUPPORTED_CONFIG_VERSION = "0.4.1"
 
-# 默认贴表情 ID 的硬兜底（配置项缺失或值非法时回退到这里）：
-# 对应 QQ 表情「祝(猪)」（emoji_reaction_extra.json 实测可贴的扩展 ID）。
-# 正常情况下默认值由配置项提供：emoji_reaction.default_emoji_id（工具默认/兜底）、
-# pig_friends.auto_emoji_id（「群友是🐷」自动贴表情），二者默认均为 12951。
+# 「群友是🐷」自动贴表情的默认和兜底 ID（祝(猪)）。
 DEFAULT_EMOJI_ID = 12951
-
-# emoji_id 合法范围上限：QQ 表情 ID 为非负 int32（越界 ID 不透传给协议端）
-MAX_EMOJI_ID = 2**31 - 1
 
 # 事件文本前缀：
 # - 常规事件（LLM 工具调用贴表情 / 群友贴表情通知翻译）：
@@ -99,55 +95,59 @@ class EmojiLikeConfig(PluginConfigBase):
 
 
 class EmojiReactionConfig(PluginConfigBase):
-    """贴表情工具（emoji_reaction 配置节）：描述库与回退行为。"""
+    """贴表情工具的检索、频控和通知补录配置。"""
 
     __ui_label__ = "贴表情工具"
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
-        "zh-CN": {"title": "贴表情工具", "description": "表情描述库、工具默认行为与通知补录。"},
-        "en": {"title": "Emoji Reaction Tool", "description": "Description library, tool defaults and reaction notices."}
+        "zh-CN": {"title": "贴表情工具", "description": "表情检索、贴表情冷却与通知补录。"},
+        "en": {"title": "Emoji Reaction Tool", "description": "Emoji search, reaction cooldown and notices."}
     }
     __ui_icon__ = "swap_horiz"
     __ui_order__ = 2
 
+    search_result_limit: int = Field(
+        default=5,
+        ge=1,
+        description="每次关键词检索最多返回的表情数。命中更多时随机抽取。",
+        json_schema_extra=_ui_field(
+            "检索结果上限", "命中超出上限时随机抽取",
+            "Search result limit", "Randomly sample results when the limit is exceeded",
+        ),
+    )
+
+    featured_emoji_mode: Literal["不使用", "使用", "始终启用"] = Field(
+        default="使用",
+        description="不使用：不附精选表情。使用：仅在关键词查询无结果时附上精选表情。始终启用：每次关键词查询都附上精选表情。",
+        json_schema_extra=_ui_field(
+            "精选表情模式", "默认仅在查询无结果时附上精选表情",
+            "Featured emoji mode", "By default, show featured emoji only when there are no matches",
+        ),
+    )
+
+    featured_emoji_ids: list[int] = Field(
+        default_factory=lambda: [424, 478, 479, 12951],
+        description="按顺序列出精选表情的 ID。请填写映射表内已收录的 ID，留空时没有精选候选。",
+        json_schema_extra=_ui_field(
+            "精选表情 ID", "按填写顺序向 Bot 推荐精选表情",
+            "Featured emoji IDs", "Shown to the bot in the configured order",
+        ),
+    )
+
     description_library: list[str] = Field(
-        default_factory=lambda: [
-            f"{emoji_id}: {desc}" for emoji_id, desc in DEFAULT_DESCRIPTION_LIBRARY.items()
-        ],
-        description="描述库（每行一条）：`emoji_id: 描述`。如 `12951: 该回应表情等效网络流行的猪猪表情包，表达群友可爱又有点笨的样子`",
+        default_factory=list,
+        description="可选的旧配置描述覆盖，每行一条「表情 ID: 描述」。留空使用映射表。",
         json_schema_extra=_ui_field(
-            "描述库", "表情描述库，一行一条",
-            "Description library", "One 'emoji_id: description' entry per line",
-        ),
-    )
-
-    default_emoji_id: int = Field(
-        default=DEFAULT_EMOJI_ID,
-        description=(
-            "默认/兜底表情 ID（默认 12951，祝(猪)）：emoji_like 工具不传 emoji 参数时使用它；"
-            "开启「未识别表达回退」时，无法识别的表情表达也自动回退到它。"
-            "需为 0 ~ 2147483647 的整数，非法/越界值回退默认 12951"
-        ),
-        json_schema_extra=_ui_field(
-            "默认/兜底表情 ID", "工具默认与未识别回退的表情",
-            "Default/fallback emoji ID", "Used when emoji param is empty or unrecognized",
-        ),
-    )
-
-    allow_fallback_to_default: bool = Field(
-        default=True,
-        description="未识别的表情表达回退到默认表情（见「默认/兜底表情 ID」）：LLM 传了描述库外的情绪词（如「开心」「俏皮」）或无效表情时，不再报错，而是自动使用默认表情",
-        json_schema_extra=_ui_field(
-            "未识别表达回退默认表情", "未识别回退默认表情",
-            "Fallback to default emoji", "Use default emoji when unrecognized",
+            "自定义描述覆盖", "留空使用映射表",
+            "Description overrides", "Leave empty to use the emoji maps",
         ),
     )
 
     tool_cooldown_seconds: float = Field(
         default=10.0,
-        description="emoji_like 工具每个会话的最小调用间隔秒数（防刷屏频控，默认 10 秒；0 = 不限频）",
+        description="每个会话实际贴表情的最小间隔（默认 10 秒，0 = 不限频），查询不占冷却",
         json_schema_extra=_ui_field(
             "贴表情工具冷却（秒）", "每会话最小调用间隔",
-            "Tool cooldown (seconds)", "Min per-stream call interval",
+            "Reaction cooldown (seconds)", "Minimum interval between reactions in a chat",
         ),
     )
 
@@ -169,12 +169,13 @@ class EmojiReactionConfig(PluginConfigBase):
     @classmethod
     def _coerce_description_library(cls, value: Any) -> Any:
         """兼容旧配置格式：str JSON / dict → list[str]（每行 `id: 描述`）。"""
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str):
+            if not value.strip():
+                return []
             try:
-                parsed = json.loads(value)
-            except Exception:
+                value = json.loads(value)
+            except ValueError:
                 return value
-            value = parsed
         if isinstance(value, Mapping):
             return [f"{k}: {v}" for k, v in value.items()]
         return value
@@ -319,13 +320,9 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        # 表情解析器：显式用「相对导入」构造，避免 runner 加载插件时
-        # sys.path 不含插件目录导致的绝对导入失败（`from emoji_map...` 找不到包，
-        # 退化为 _FallbackResolver → 所有表情都显示「一个表情」）。
-        from .emoji_map.qq_emoji_resolver import QQEmojiResolver
-
-        self._notice_parser = EmojiLikeNoticeParser(emoji_resolver=QQEmojiResolver())  # 表情回应通知解析器（内含表情映射）
-        self._replacer = EmojiReactionReplacer()  # 贴表情核心逻辑（描述库/参数/聊天记录）
+        self._emoji_resolver = QQEmojiResolver()
+        self._notice_parser = EmojiLikeNoticeParser(emoji_resolver=self._emoji_resolver)
+        self._replacer = EmojiReactionReplacer()
         self._pig_state = PigReactState()  # 「群友是🐷」冷却与连贴状态
         self._pig_state_last_cleanup = 0.0  # 上次冷却状态清理时间（每小时低频清理一次）
         self._bot_nickname_cache: Dict[str, Any] = {"value": "", "expires": 0.0}  # 机器人昵称缓存
@@ -351,112 +348,61 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         del kwargs
         return None
 
-    # ==================== Tool：贴表情 ====================
-
-    @Tool(
-        "emoji_like_list",
-        brief_description="查询可用的贴表情（emoji_like）列表：必须先调用本工具确认表情 ID 后，才能用 emoji_like 贴表情",
-        description=(
-            "查询本插件配置的可贴表情列表。返回值中的 content 字段（纯文本）逐行列出了"
-            "每个表情的 emoji_id（数字）、名称与含义，例如「- emoji_id=14，微笑：礼貌微笑，表达友好、客气」。"
-            "在调用 emoji_like 贴表情之前，必须先调用本工具查看有哪些可用表情及其 ID，"
-            "然后把你想要的表情对应的 emoji_id（数字）传给 emoji_like 工具，不要凭印象编造表情表达或 ID。"
-            "本工具无参数，直接调用即可。"
-        ),
-        parameters=[],
-    )
-    async def tool_emoji_like_list(self, **kwargs: Any) -> Dict[str, Any]:
-        """查询可用的贴表情列表（供 LLM 在调用 emoji_like 前确认表情与 ID）。"""
-        del kwargs
-        library = self._get_description_library()
-        default_id = self._get_default_emoji_id()
-        default_name = self._notice_parser.emoji_resolver.resolve(str(default_id))
-        if not library:
-            return {
-                "success": True,
-                "emoji_list": [],
-                "content": (
-                    f"当前没有配置任何表情，贴表情将使用默认表情 {default_id}（{default_name}）。"
-                    "直接调用 emoji_like 且不传 emoji 参数即可。"
-                ),
-                "message": f"当前没有配置任何表情，将使用默认表情 {default_id}",
-                "default_emoji_id": str(default_id),
-            }
-        emoji_list = [
-            {
-                "emoji_id": emoji_id,
-                "emoji_name": self._notice_parser.emoji_resolver.resolve(emoji_id),
-                "description": desc,
-            }
-            for emoji_id, desc in library.items()
-        ]
-        # content 是 MaiBot Tool 规范中给 LLM 阅读的文本（其他结构化字段 LLM 未必可见），
-        # 必须把 ID 以纯文本逐行列出，否则 LLM 只看到描述看不到数字 ID。
-        lines = [
-            f"可用贴表情 {len(emoji_list)} 个（emoji_id 是传给 emoji_like 的 emoji 参数值）："
-        ]
-        for item in emoji_list:
-            lines.append(
-                f"- emoji_id={item['emoji_id']}，{item['emoji_name']}：{item['description']}"
-            )
-        lines.append(
-            f"默认表情：emoji_id={default_id}（{default_name}），"
-            "选择要用的表情后，把对应 emoji_id（数字）传给 emoji_like 工具；"
-            "也可以不传 emoji 参数使用默认表情。"
-        )
-        content = "\n".join(lines)
-        return {
-            "success": True,
-            "emoji_list": emoji_list,
-            "content": content,
-            "message": content,
-            "default_emoji_id": str(default_id),
-        }
+    # ==================== Tool：查询或贴表情 ====================
 
     @Tool(
         "emoji_like",
+        brief_description="按中文情绪或描述查询 QQ 表情，按数字 ID 贴表情",
         description=(
-            "对聊天中的某条消息贴一个 QQ 表情回应（reaction）。"
-            "用于替代 send_emoji 表达情绪或与群友交互：当你想表达赞同、开心、无奈、可爱等情绪，"
-            "或想与群友互动时，可以对目标消息贴一个表情回应，比发送表情包更轻量自然。"
-            "默认贴到最近一条非机器人消息（通常是你正在回复/讨论的那条）。"
-            "调用前请先调用 emoji_like_list 确认可用的表情及其 ID，再把对应的 ID 传入 emoji 参数，"
-            "不要凭印象编造表情表达或 ID。若你传入的描述无法识别，插件会自动回退到默认表情"
-            "（具体 ID 见 emoji_like_list 返回的 default_emoji_id）。"
-            "调用后请在你的回复中自然提及这次贴表情，避免重复表达。"
+            "对聊天消息贴 QQ 表情回应，可作为 send_emoji 的轻量替代。"
+            "如果只知道想表达的情绪，先把简短的中文词传入 emoji（如「开心」「无奈」「赞同」）。"
+            "工具会返回匹配表情的 ID、名称和描述，并可能附上精选表情。"
+            "选好后，将返回的数字 ID 再传给本工具即可贴表情。"
+            "如果已经知道有效的数字 ID，可以直接贴。遇到无效 ID 时改用关键词查询。"
+            "贴表情默认使用最近一条非机器人消息。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="emoji",
                 param_type=ToolParamType.STRING,
-                description=(
-                    "要贴的表情 ID（数字，如 14、66、12951）。"
-                    "先调用 emoji_like_list 查看可用表情及其 emoji_id，把对应的数字 ID 传到这里；"
-                    "也可以是描述库中的表达（如「猪猪表情」）。"
-                    "留空时使用默认表情（ID 见 emoji_like_list 返回的 default_emoji_id）。"
-                ),
-                required=False,
+                description="数字 ID（如「76」）用于贴表情，中文关键词（如「赞同」）用于查询表情。",
+                required=True,
             ),
             ToolParameterInfo(
                 name="target_message_id",
                 param_type=ToolParamType.STRING,
-                description=(
-                    "目标消息 ID（可选）。一般不需要传，插件会自动定位最近一条非机器人消息；"
-                    "只有你明确知道要对某条具体消息贴表情时才传。"
-                ),
+                description="贴表情的目标消息 ID。省略时使用最近一条非机器人消息。",
                 required=False,
             ),
         ],
     )
     async def tool_emoji_like(self, **kwargs: Any) -> Dict[str, Any]:
-        """对消息贴 QQ 表情回应（LLM 工具入口）。"""
-        stream_id = str(kwargs.get("stream_id") or "")
-        emoji_raw = str(kwargs.get("emoji") or "").strip()
-        target_message_id = str(kwargs.get("target_message_id") or "").strip()
-        if not stream_id:
-            return {"success": False, "error": "缺少 stream_id，无法贴表情"}
+        """用关键词查询表情，或按已收录的 ID 贴表情。"""
+        raw_emoji = kwargs.get("emoji")
+        query = normalize("NFKC", str(raw_emoji)).strip() if raw_emoji is not None else ""
+        if not query:
+            return self._tool_error("请传入中文情绪词查询表情，或传入已知的数字 ID 贴表情。")
+        if not query.lstrip("+-").isdecimal():
+            return self._search_emoji(query)
 
-        # 0. 频控：每会话最小调用间隔（防失控模型/提示注入诱导刷屏；0 = 不限频）
+        emoji_id = parse_emoji_id(query)
+        if emoji_id is None or self._emoji_resolver.get(emoji_id) is None:
+            return self._tool_error(
+                f"表情 ID {sanitize_user_text(query)} 无效或未收录。"
+                "请用中文情绪词查询表情，再传入查询返回的 ID。"
+            )
+
+        stream_id = str(kwargs.get("stream_id") or "").strip()
+        if not stream_id:
+            return self._tool_error("缺少会话信息，无法贴表情。")
+
+        target_message_id = str(kwargs.get("target_message_id") or "").strip()
+        if not target_message_id:
+            target_message_id = await self._find_recent_user_message(stream_id)
+        if not target_message_id:
+            return self._tool_error("未找到可贴表情的目标消息（最近没有非机器人消息）。")
+
+        # 只对实际贴表情的分支限频，检索和无效 ID 不占冷却。
         try:
             tool_cooldown = float(self.config.emoji_reaction.tool_cooldown_seconds)
         except (TypeError, ValueError):
@@ -464,100 +410,94 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         if tool_cooldown < 0:
             tool_cooldown = 10.0
         if tool_cooldown > 0 and not self._pig_state.tool_try_take(stream_id, time.time(), tool_cooldown):
-            error_text = "贴表情太频繁，请稍等片刻后再试"
-            return {"success": False, "error": error_text, "content": error_text}
+            return self._tool_error("贴表情太频繁，请稍等片刻后再试。")
 
-        # 1. 解析表情 ID（描述库匹配 or 直接数字；失败回退默认表情）
-        emoji_id, fallback_used = self._resolve_emoji_id(emoji_raw)
-        if emoji_id is None:
-            error_text = (
-                f"未识别的表情表达：{emoji_raw!r}。"
-                "请先调用 emoji_like_list 查看可用表情及其 ID，"
-                "把对应的 emoji_id（数字）传给本工具的 emoji 参数；"
-                f"或留空 emoji 参数使用默认表情（{self._get_default_emoji_id()}）。"
-                "不要反复尝试未列出的表达。"
-            )
-            return {"success": False, "error": error_text, "content": error_text}
-
-        # 2. 定位目标消息（未指定时取最近一条非机器人消息）
-        if not target_message_id:
-            target_message_id = await self._find_recent_user_message(stream_id)
-        if not target_message_id:
-            return {"success": False, "error": "未找到可贴表情的目标消息（最近没有非机器人消息）"}
-
-        # 3. 贴表情
         ok, error = await self._apply_emoji_like(stream_id, target_message_id, emoji_id)
         if not ok:
-            return {"success": False, "error": error}
+            return self._tool_error(error)
 
-        # 4. 写聊天流记录（WebUI 可见）+ 注入 Planner 上下文
         await self._record_and_context(stream_id, target_message_id, emoji_id)
-
+        emoji_name = self._emoji_resolver.resolve(emoji_id)
         desc = self._emoji_description(emoji_id)
-        emoji_name = self._notice_parser.emoji_resolver.resolve(emoji_id)
-        success_text = f"已对消息(ID:{target_message_id})贴了表情：{emoji_name}(ID:{emoji_id})，{desc}"
-        result: Dict[str, Any] = {
+        content = f"已对消息(ID:{target_message_id})贴了表情：{emoji_name}(ID:{emoji_id})，{desc}"
+        return {
             "success": True,
-            "content": success_text,
-            "message": success_text,
+            "content": content,
+            "message": content,
             "emoji_id": emoji_id,
             "emoji_name": emoji_name,
             "target_message_id": target_message_id,
         }
-        if fallback_used:
-            result["notice"] = (
-                f"传入的表情表达「{emoji_raw}」未命中描述库，已自动回退到默认表情 {emoji_id}"
+
+    def _search_emoji(self, query: str) -> Dict[str, Any]:
+        config = self.config.emoji_reaction
+        matches = self._emoji_resolver.search(query)
+        count = len(matches)
+        if count > config.search_result_limit:
+            matches = random.sample(matches, config.search_result_limit)
+        emoji_list = self._emoji_candidates(matches)
+        featured_emoji_list: list[Dict[str, str]] = []
+        if config.featured_emoji_mode == "始终启用" or (config.featured_emoji_mode == "使用" and not count):
+            featured_emoji_list = self._emoji_candidates(
+                emoji for emoji_id in dict.fromkeys(config.featured_emoji_ids)
+                if (emoji := self._emoji_resolver.get(emoji_id)) is not None
             )
-        return result
+
+        label = sanitize_user_text(query)
+        if emoji_list:
+            lines = [f"「{label}」匹配 {count} 个表情，返回 {len(emoji_list)} 个。"]
+            lines.extend(self._emoji_candidate_lines(emoji_list))
+        else:
+            lines = [f"没有找到包含「{label}」的表情。"]
+
+        if emoji_list or featured_emoji_list:
+            lines.append("选好后，把对应数字 ID 传入 emoji_like 的 emoji 参数即可贴表情。")
+        else:
+            lines.append("请换一个简短的情绪词查询。")
+        if featured_emoji_list:
+            lines.extend(("", "以下是精选表情，可按当前语境选择。"))
+            lines.extend(self._emoji_candidate_lines(featured_emoji_list))
+
+        content = "\n".join(lines)
+        return {
+            "success": True,
+            "emoji_list": emoji_list,
+            "matched_count": count,
+            "featured_emoji_list": featured_emoji_list,
+            "content": content,
+            "message": content,
+        }
+
+    @staticmethod
+    def _emoji_candidates(emojis: Iterable[QQEmoji]) -> list[Dict[str, str]]:
+        return [
+            {"emoji_id": emoji.emoji_id, "emoji_name": emoji.name, "description": emoji.description or emoji.name}
+            for emoji in emojis
+        ]
+
+    @staticmethod
+    def _emoji_candidate_lines(items: list[Dict[str, str]]) -> Iterable[str]:
+        for item in items:
+            yield f"- ID {item['emoji_id']} {item['emoji_name']}：{item['description']}"
+
+    @staticmethod
+    def _tool_error(text: str) -> Dict[str, Any]:
+        return {"success": False, "error": text, "content": text}
 
     # ==================== 贴表情辅助 ====================
 
-    def _get_description_library(self) -> Dict[str, str]:
-        """解析配置的 description_library 为 {emoji_id: 描述}。
-
-        支持三种格式：
-        - list[str]（当前主格式）：每行 `emoji_id: 描述`；
-        - dict（旧格式）：{emoji_id: 描述}；
-        - str JSON（过渡格式）：JSON 字符串。
-        """
-        raw = self.config.emoji_reaction.description_library
-        parsed: Any = None
-        if isinstance(raw, list):
-            # 主格式：每行 "emoji_id: 描述"
-            parsed = {}
-            for line in raw:
-                line = str(line or "").strip()
-                if not line:
-                    continue
-                if ":" in line:
-                    emoji_id, _, desc = line.partition(":")
-                    emoji_id = emoji_id.strip()
-                    desc = desc.strip()
-                    if emoji_id and desc:
-                        parsed[emoji_id] = desc
-        elif isinstance(raw, Mapping):
-            parsed = raw  # 兼容旧 dict 配置
-        elif isinstance(raw, str) and raw.strip():
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                self.ctx.logger.warning("description_library JSON 解析失败，使用默认：%r", raw[:80])
-        return self._replacer.normalize_description_library(parsed or DEFAULT_DESCRIPTION_LIBRARY)
-
-    @staticmethod
-    def _safe_emoji_id(value: Any) -> Optional[int]:
-        """把输入解析为合法表情 ID（非负 int32）；非法或越界返回 None。"""
-        try:
-            emoji_id = int(str(value).strip())
-        except (TypeError, ValueError):
-            return None
-        if 0 <= emoji_id <= MAX_EMOJI_ID:
-            return emoji_id
-        return None
+    def _get_description_overrides(self) -> Dict[str, str]:
+        """读取旧配置中自定义的 ID 与描述。"""
+        descriptions = {}
+        for line in self.config.emoji_reaction.description_library:
+            emoji_id, _, description = line.partition(":")
+            if emoji_id.strip() and description.strip():
+                descriptions[emoji_id.strip()] = description.strip()
+        return descriptions
 
     def _validated_config_emoji_id(self, raw_value: Any, config_name: str) -> int:
         """校验配置的表情 ID（非负 int32）；非法/越界回退硬兜底 DEFAULT_EMOJI_ID 并告警。"""
-        emoji_id = self._safe_emoji_id(raw_value)
+        emoji_id = parse_emoji_id(raw_value)
         if emoji_id is None:
             self.ctx.logger.warning(
                 "配置 %s=%r 无效（需为 0 ~ %d 的整数），回退默认表情 %d",
@@ -565,15 +505,6 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             )
             return DEFAULT_EMOJI_ID
         return emoji_id
-
-    def _get_default_emoji_id(self) -> int:
-        """emoji_like 工具的默认/兜底表情 ID（配置 emoji_reaction.default_emoji_id）。"""
-        try:
-            return self._validated_config_emoji_id(
-                self.config.emoji_reaction.default_emoji_id, "emoji_reaction.default_emoji_id"
-            )
-        except Exception:
-            return DEFAULT_EMOJI_ID
 
     def _get_pig_auto_emoji_id(self) -> int:
         """「群友是🐷」自动贴表情 ID（配置 pig_friends.auto_emoji_id）。"""
@@ -583,55 +514,6 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             )
         except Exception:
             return DEFAULT_EMOJI_ID
-
-    def _resolve_emoji_id(self, emoji_raw: str) -> tuple[Optional[int], bool]:
-        """解析表情：表情名反查 → 描述库文本匹配 → 数字直接转 int → 失败回退默认表情。
-
-        Returns:
-            tuple[Optional[int], bool]: (表情 ID, 是否回退到默认表情)。
-            当配置 `allow_fallback_to_default` 开启时，任何无法识别的输入
-            （描述库外的情绪词、无效文本等）都会回退到默认表情，不再返回 None。
-        """
-        emoji_raw = str(emoji_raw or "").strip()
-        default_id = self._get_default_emoji_id()
-        if not emoji_raw:
-            # 空 → 默认表情（不算回退，是正常默认）
-            return default_id, False
-        library = self._get_description_library()
-
-        # 1. 表情名反查（映射表：名称 → ID）。LLM 可能直接传表情名（如「可爱」「吃瓜」），
-        #    这在描述库文本中未必出现，但映射表里有名称。优先精确名称匹配，且只认描述库内的 ID，
-        #    避免把描述库外的表情名也匹配进来（贴了描述库外的表情，通知翻译时无描述可显示）。
-        try:
-            resolver = self._notice_parser.emoji_resolver
-            for emoji_id in library:
-                if str(resolver.resolve(emoji_id)) == emoji_raw:
-                    emoji_id_num = self._safe_emoji_id(emoji_id)
-                    if emoji_id_num is not None:
-                        return emoji_id_num, False
-        except Exception:
-            pass
-
-        # 2. 描述库：值匹配（描述文本）。精确匹配优先；子串匹配仅认
-        #    「输入包含于描述」单向、且要求输入 ≥2 字符——避免「猪」这类
-        #    单字/宽泛词经双向子串模糊命中多条或意外条目。
-        if len(emoji_raw) >= 2:
-            for emoji_id, desc in library.items():
-                if emoji_raw == desc or emoji_raw in desc:
-                    emoji_id_num = self._safe_emoji_id(emoji_id)
-                    if emoji_id_num is not None:
-                        return emoji_id_num, False
-        # 3. 直接数字（范围校验：QQ 表情 ID 为非负 int32，越界视为无效走回退）
-        numeric_id = self._safe_emoji_id(emoji_raw)
-        if numeric_id is not None:
-            return numeric_id, False
-        # 4. 无法识别 → 是否回退默认表情（防止 LLM 传情绪词「开心」「俏皮」等导致失败）
-        if self.config.emoji_reaction.allow_fallback_to_default:
-            self.ctx.logger.info(
-                "表情表达「%s」未命中描述库，回退到默认表情 %d", emoji_raw, default_id
-            )
-            return default_id, True
-        return None, False
 
     async def _find_recent_user_message(self, stream_id: str) -> str:
         """找最近一条非机器人消息的 message_id（get_by_time_in_chat + filter_mai）。"""
@@ -670,10 +552,10 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         if not str(stream_id or "").strip():
             # 无会话 ID：api.call 或许能发出，但后续记录注入必然失败——统一提前拒绝
             return False, "缺少会话信息，无法贴表情"
-        emoji_id_num = self._safe_emoji_id(emoji_id)
+        emoji_id_num = parse_emoji_id(emoji_id)
         if emoji_id_num is None:
             # 表情 ID 必须是非负 int32，越界 ID 不透传给协议端（防无效调用）
-            return False, "表情 ID 无效或超出有效范围，请用 emoji_like_list 查询可用表情"
+            return False, "表情 ID 无效或超出有效范围，请用 emoji_like 按关键词查询表情"
         emoji_id = emoji_id_num
         if EmojiReactionReplacer.parse_reactable_message_id(message_id) is None:
             # 合成通知（如适配器注入的 qq-notice-*、本插件的 emoji-reaction-notice-*）不是真实 QQ 消息，
@@ -705,8 +587,8 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
         return True, ""
 
     def _emoji_description(self, emoji_id: int) -> str:
-        library = self._get_description_library()
-        return library.get(str(emoji_id), "") or f"表情 {emoji_id}"
+        entry = self._emoji_resolver.get(emoji_id)
+        return (entry.description or entry.name) if entry else f"表情 {emoji_id}"
 
     async def _record_and_context(
         self, stream_id: str, message_id: str, emoji_id: int, *, event_tag: str = EVENT_TAG_NORMAL
@@ -1109,17 +991,9 @@ class CateyeSetMsgEmojiLikePlugin(MaiBotPlugin):
             )
 
     def _sync_notice_config(self) -> None:
-        """把配置的「未知表情优化」开关和描述库同步到通知解析器。"""
-        try:
-            optimize = bool(self.config.emoji.optimize_unknown_emoji)
-        except Exception:
-            optimize = False
-        self._notice_parser.optimize_unknown = optimize
-        try:
-            library = self._get_description_library()
-        except Exception:
-            library = {}
-        self._notice_parser.set_description_library(library)
+        """同步通知设置与旧配置中的自定义描述。"""
+        self._notice_parser.optimize_unknown = self.config.emoji.optimize_unknown_emoji
+        self._emoji_resolver.set_description_overrides(self._get_description_overrides())
 
     # ==================== 生命周期 ====================
 

@@ -5,7 +5,7 @@
 1. 把 NapCat `qq_emoji_list.py` 的 QQ_FACE 转成 JSON（qq_face_napcat.json）；
 2. 把 SnowLuma `qq_face_map.py` 的 QQ_FACE_DESCRIPTIONS 转成 JSON（qq_face_snowluma.json）；
 3. 生成合并后的基础映射（以 NapCat 表为主，标注 SnowLuma 差异）；
-4. 提供 JSON 覆盖加载函数（id -> 名称，Undefined 机制反向版），供插件使用。
+4. 按 ID 和名称保留现有快照的描述和情绪标签。
 
 用法：
     python merge_emoji_maps.py            # 生成各 JSON 文件
@@ -22,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 NAPCAT_LIST = HERE.parent.parent / "MaiBot-Napcat-Adapter-main" / "qq_emoji_list.py"
 SNOWLUMA_MAP = HERE.parent.parent / "MaiBot-SnowLuma-Adapter-main" / "qq_face_map.py"
+SOURCE_MAPS = ("qq_face_napcat.json", "qq_face_snowluma.json", "qq_face_official.json")
+MERGED_MAP = "qq_face_merged.json"
 
 
 def _extract_py_dict(text: str, dict_name: str) -> dict[str, str]:
@@ -97,46 +99,66 @@ def load_official() -> dict[str, str]:
     }
 
 
+def load_metadata() -> dict[tuple[str, str], dict]:
+    """读取现有快照中的说明。已合并的表情以合并表的说明为准。"""
+    metadata = {}
+    for filename in (*SOURCE_MAPS, MERGED_MAP):
+        path = HERE / filename
+        if not path.is_file():
+            continue
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        for emoji_id, entry in entries.items():
+            if isinstance(entry, dict) and entry.get("name") and entry.get("description") and entry.get("emotion_tags"):
+                metadata[(emoji_id, entry["name"])] = entry
+    return metadata
+
+
+def write_maps(tables: dict[str, dict[str, str]]) -> None:
+    metadata = load_metadata()
+    missing = {
+        (emoji_id, name)
+        for table in tables.values()
+        for emoji_id, name in table.items()
+        if (emoji_id, name) not in metadata
+    }
+    if missing:
+        details = "、".join(f"{emoji_id} {name}" for emoji_id, name in sorted(missing, key=lambda item: int(item[0])))
+        raise SystemExit(f"请先在来源快照中补齐这些表情的名称、描述和情绪标签：{details}")
+
+    for filename, table in tables.items():
+        body = ",\n".join(
+            f"  {json.dumps(emoji_id)}: {json.dumps(metadata[emoji_id, name], ensure_ascii=False)}"
+            for emoji_id, name in table.items()
+        )
+        (HERE / filename).write_text("{\n" + body + "\n}\n", encoding="utf-8")
+        print(f"已生成 {filename}（{len(table)} 条）")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="QQ 表情映射合并工具")
-    parser.add_argument("--merge", action="store_true", help="同时生成合并映射")
+    parser.add_argument("--merge", action="store_true", help="同时生成合并映射 qq_face_merged.json")
     args = parser.parse_args()
 
     napcat = load_napcat()
     snowluma = load_snowluma()
     official = load_official()
-
-    (HERE / "qq_face_napcat.json").write_text(
-        json.dumps(napcat, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (HERE / "qq_face_snowluma.json").write_text(
-        json.dumps(snowluma, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (HERE / "qq_face_official.json").write_text(
-        json.dumps(official, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"已生成：qq_face_napcat.json（{len(napcat)} 条）、qq_face_snowluma.json（{len(snowluma)} 条）、"
-          f"qq_face_official.json（{len(official)} 条）")
-
+    tables = dict(zip(SOURCE_MAPS, (napcat, snowluma, official)))
+    conflicts: dict[str, tuple[str, str]] = {}
     if args.merge:
-        # 合并：NapCat 为主，官方校正，SnowLuma 仅补 NapCat 缺失的（且官方未否定的）
-        merged = dict(napcat)
-        for k, v in official.items():
-            merged[k] = v  # 官方覆盖
-        conflicts: dict[str, tuple[str, str]] = {}
-        for k, v in snowluma.items():
-            if k not in merged:
-                merged[k] = v
-            elif merged[k] != v:
-                conflicts[k] = (merged[k], v)
-        (HERE / "qq_face_merged.json").write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"已生成合并映射 qq_face_merged.json（{len(merged)} 条）")
-        if conflicts:
-            print(f"⚠️ 发现 {len(conflicts)} 处 SnowLuma 与权威不一致（已以权威为准）：")
-            for k, (a, b) in sorted(conflicts.items(), key=lambda x: int(x[0])):
-                print(f"  {k}: 权威={a!r} vs SnowLuma={b!r}")
+        # 官方校正 NapCat，SnowLuma 只补缺失项。
+        merged = napcat | official
+        for key, value in snowluma.items():
+            if key not in merged:
+                merged[key] = value
+            elif merged[key] != value:
+                conflicts[key] = (merged[key], value)
+        tables[MERGED_MAP] = merged
+
+    write_maps(tables)
+    if conflicts:
+        print(f"发现 {len(conflicts)} 处 SnowLuma 名称差异（按合并表名称）：")
+        for key, (canonical, other) in sorted(conflicts.items(), key=lambda item: int(item[0])):
+            print(f"  {key}: {canonical!r} / {other!r}")
 
 
 if __name__ == "__main__":

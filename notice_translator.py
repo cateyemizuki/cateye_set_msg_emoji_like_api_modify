@@ -69,7 +69,7 @@ class EmojiLikeNoticeParser:
                 缺省时内部 lazy 导入 emoji_map.qq_emoji_resolver.QQEmojiResolver。
             optimize_unknown: 是否优化未知表情信息。True：未知表情显示为
                 「一个表情」；False（默认）：显示「未知表情<id>」（与 snowluma 一致）。
-            description_library: 插件的描述库 {emoji_id: 描述}。命中时在表情后追加
+            description_library: 可选的描述覆盖 {emoji_id: 描述}。命中时在表情后追加
                 「：描述」（如「一个表情：该回应表情等效网络流行的猪猪表情包...」）。
         """
         self._emoji_resolver = emoji_resolver
@@ -155,12 +155,15 @@ class EmojiLikeNoticeParser:
             likes = []
 
         names = [sanitize_user_text(n) for n in self.emoji_resolver.resolve_likes(likes)] if likes else []
-        # 描述库命中：首个表情 ID 若在描述库中，取描述文本（如「一个表情：<描述>」）
+        # 只附上首个表情的描述，保留其他表情的名称。
         desc_hint = ""
-        if likes and self._description_library:
-            first_emoji_id = str(likes[0].get("emoji_id") or "").strip() if isinstance(likes[0], Mapping) else ""
-            if first_emoji_id:
-                desc_hint = self._description_library.get(first_emoji_id, "")
+        if likes and isinstance(likes[0], Mapping):
+            first_emoji_id = likes[0].get("emoji_id")
+            if first_emoji_id is not None:
+                desc_hint = self._description_library.get(str(first_emoji_id).strip(), "")
+                describe = getattr(self.emoji_resolver, "description", None)
+                if not desc_hint and callable(describe):
+                    desc_hint = describe(first_emoji_id)
         # 未知表情（映射表缺失）：名称列表可能含 [未知表情<id>]；按 optimize_unknown 决定是否优化
         summary = self._build_summary(
             actor=sanitize_user_text(actor_nickname or actor_user_id) or "有人",
@@ -209,25 +212,18 @@ class EmojiLikeNoticeParser:
           （表情名取映射表解析结果，如「玫瑰：鲜花」；映射表缺失时退回「一个表情：<描述>」）。
         """
         target = f"消息(ID:{sanitize_user_text(target_message_id, max_len=24)})" if target_message_id else "一条消息"
+        remaining = names if has_likes else []
+        first_description = ""
         if desc_hint:
-            # 描述库命中：优先显示「映射表情名：描述」（如「玫瑰：鲜花」）。
-            # 表情名取 names 第一项并去掉方括号；names 为空（映射表缺失）时退回「一个表情：描述」。
-            name_str = ""
-            if has_likes and names:
-                name_str = str(names[0]).strip("[]")
-            emoji_part = f"{name_str}：{sanitize_user_text(desc_hint, max_len=96)}" if name_str else f"一个表情：{sanitize_user_text(desc_hint, max_len=96)}"
-        elif has_likes and names:
-            if optimize_unknown:
-                known = [
-                    n
-                    for n in names
-                    if n and not (n.startswith("[未知") or "未知表情" in n)
-                ]
-                emoji_part = "、".join(known) if known else "一个表情"
-            else:
-                emoji_part = "、".join(names)
-        else:
-            emoji_part = "一个表情"
+            first_name = "一个表情"
+            if remaining:
+                first_name = remaining[0].removeprefix("[").replace("]", "", 1)
+                remaining = remaining[1:]
+            first_description = f"{first_name}：{sanitize_user_text(desc_hint, max_len=96)}"
+        if optimize_unknown:
+            remaining = [name for name in remaining if name and "未知表情" not in name]
+        display = [first_description, *remaining] if first_description else remaining
+        emoji_part = "、".join(display) if display else "一个表情"
         return f"[事件-群消息表情回应] {actor} 对{target}表达了 {emoji_part}"
 
     @staticmethod

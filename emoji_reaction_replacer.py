@@ -1,53 +1,16 @@
 """贴表情核心逻辑（纯 Python，不依赖 SDK）。
 
 提供：
-1. 描述库规范化（emoji_id -> 描述文本，供 LLM 工具选择）；
-2. set_msg_emoji_like 动作参数构造（message_id 保留符号，负 ID 合法）；
-3. 合成通知消息构造（MessageGateway 注入，走完整入站链入库）；
-4. 「群友是🐷」冷却/连贴状态机（PigReactState）与工具频控。
+1. set_msg_emoji_like 动作参数构造（message_id 保留符号，负 ID 合法）；
+2. 合成通知消息构造（MessageGateway 注入，走完整入站链入库）；
+3. 「群友是🐷」冷却/连贴状态机（PigReactState）与工具频控。
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
-# 描述库配置默认值：emoji_id -> 描述文本
-# 从 emoji_map/ 内置映射表中挑选的代表性经典 face ID（QQ 经典表情 ID 体系，
-# 可直接用于 set_msg_emoji_like 表情回应），覆盖常见情绪/互动场景。
-# 描述只写含义说明（不含表情名）：表情名由 emoji_map 映射表解析，
-# 供 LLM 通过 emoji_like_list 查看（含名称），同时通知翻译命中时
-# 显示为「表情名：描述」不重复。
-DEFAULT_DESCRIPTION_LIBRARY: Dict[str, str] = {
-    "12951": "等效网络流行的猪猪表情包，表达群友可爱又有点笨的样子（祝(猪)）",
-    "14": "礼貌微笑，表达友好、客气",
-    "21": "表达亲昵、喜爱",
-    "46": "调侃对方像小猪，可爱又笨",
-    "66": "表达爱意、喜欢",
-    "76": "点赞，表达赞同、认可",
-    "174": "表达无语、没办法",
-    "182": "哭笑不得，又好气又好笑",
-    "271": "围观、看热闹",
-    "319": "表达感谢、喜欢",
-    "357": "崩溃、无语、心态爆炸",
-}
-
-
 class EmojiReactionReplacer:
     """贴表情核心逻辑。"""
-
-    # ---------- 描述库 ----------
-
-    @staticmethod
-    def normalize_description_library(raw: Any) -> Dict[str, str]:
-        """规范化描述库配置：{emoji_id: 描述}。"""
-        library: Dict[str, str] = {}
-        if not isinstance(raw, Mapping):
-            return library
-        for key, value in raw.items():
-            emoji_id = str(key).strip()
-            desc = str(value or "").strip()
-            if emoji_id and desc:
-                library[emoji_id] = desc
-        return library
 
     # ---------- 执行贴表情 ----------
 
